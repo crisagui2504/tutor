@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { Markup } from 'telegraf';
 import { Profile } from '../models/profile.js';
 import { matchSkills, recordScore } from './cv_matcher.js';
-import { config } from '../config.js';
+import { scraperSkills } from './scraper_client.js';
 import { logger } from '../logger.js';
 
 /**
@@ -43,9 +43,7 @@ async function monthlyRescore(bot) {
       // Los perfiles viejos sin especialidad se saltan (se migran al usar el bot)
       if (!profile.especialidad) continue;
 
-      const res = await fetch(
-        `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=10`
-      );
+      const res = await scraperSkills(profile.especialidad, 10);
       if (!res.ok) continue;
 
       const data = await res.json();

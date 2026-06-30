@@ -21,4 +21,7 @@ export const config = {
   groqKey: process.env.GROQ_API_KEY || '',
   env: process.env.NODE_ENV || 'development',
   scraperUrl: process.env.SCRAPER_URL || 'http://localhost:5001',
+  // Secreto compartido Node<->Flask. Si está vacío, la auth queda desactivada
+  // (cómodo en local); en producción ponlo en ambos .env.
+  apiSecret: process.env.API_SECRET_KEY || '',
 };

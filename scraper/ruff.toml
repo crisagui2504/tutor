@@ -1,0 +1,9 @@
+# Configuración de Ruff (linter/formatter de Python).
+# Uso: pip install ruff && ruff check scraper   (o ruff format scraper)
+line-length = 100
+target-version = "py311"
+
+[lint]
+# E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # el largo de línea lo maneja el formatter

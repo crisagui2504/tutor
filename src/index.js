@@ -10,6 +10,7 @@ import { generatePlan } from './bot/planner.js';
 import { generarGraficaProgreso } from './bot/progreso.js';
 import { startScheduler } from './bot/scheduler.js';
 import { cvSteps, generarCV } from './bot/cv_generator.js';
+import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -108,18 +109,12 @@ bot.command('mercado', async (ctx) => {
 
   try {
     // Primero dispara el scrape para que haya datos
-    const scrapeRes = await fetch(`${config.scraperUrl}/scrape`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ especialidad: profile.especialidad }),
-    });
+    const scrapeRes = await scraperScrape(profile.especialidad);
 
     if (!scrapeRes.ok) throw new Error(`Scraper respondió ${scrapeRes.status}`);
 
     // Luego pide el ranking
-    const res = await fetch(
-      `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=5`
-    );
+    const res = await scraperSkills(profile.especialidad, 5);
     const data = await res.json();
 
     if (!res.ok || !data.skills?.length) {
@@ -158,9 +153,7 @@ bot.command('plan', async (ctx) => {
 
   try {
     // Obtiene las brechas actuales del mercado de su especialidad
-    const res = await fetch(
-      `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=10`
-    );
+    const res = await scraperSkills(profile.especialidad, 10);
     if (!res.ok) {
       return ctx.reply('Usa /mercado primero para obtener datos del mercado.');
     }
@@ -234,12 +227,7 @@ bot.command('becas', async (ctx) => {
   await ctx.reply('🔍 Buscando becas para tu perfil...');
 
   try {
-    const params = new URLSearchParams({
-      especialidad: profile.especialidad || '',
-      carrera: profile.carrera || '',
-      limit: '5',
-    });
-    const res = await fetch(`${config.scraperUrl}/becas?${params}`);
+    const res = await scraperBecas(profile.especialidad, profile.carrera, 5);
     const data = await res.json();
 
     if (!res.ok || !data.becas?.length) {
@@ -288,9 +276,7 @@ bot.command(['micv', 'miCV'], async (ctx) => {
   await ctx.reply('🔍 Analizando tu CV contra el mercado de tu especialidad...');
 
   try {
-    const res = await fetch(
-      `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=10`
-    );
+    const res = await scraperSkills(profile.especialidad, 10);
 
     if (!res.ok) {
       return ctx.reply('No hay datos del mercado aún. Usa /mercado primero.');

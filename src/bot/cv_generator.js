@@ -1,8 +1,22 @@
 import PDFDocument from 'pdfkit';
+import { z } from 'zod';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { STATES } from './states.js';
 import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+// Esquema esperado de la respuesta de Groq para el CV. Tolera campos extra y
+// descripción ausente; rechaza cuando faltan los obligatorios o cambian de tipo.
+const CV_SCHEMA = z.object({
+  resumen: z.string().min(1),
+  habilidades: z.record(z.string(), z.array(z.string())),
+  proyectos: z.array(
+    z.object({
+      titulo: z.string().min(1),
+      descripcion: z.string().default(''),
+    })
+  ),
+});
 
 /**
  * Generador de CV estilo Harvard.
@@ -188,19 +202,25 @@ Reglas: categoriza cada habilidad en su grupo (omite grupos vacíos). Para proye
     if (!res.ok) throw new Error(`Groq ${res.status}`);
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content ?? '';
-    const parsed = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+    const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
 
-    // Valida forma mínima; si algo falta, completa con el fallback
+    // Valida la forma con Zod: si Groq cambia el formato, esto lo detecta y
+    // caemos al fallback en vez de meter basura al PDF.
+    const result = CV_SCHEMA.safeParse(json);
+    if (!result.success) {
+      throw new Error(`Forma inválida: ${result.error.issues[0]?.message}`);
+    }
+    const parsed = result.data;
+
+    // Quita categorías de skills vacías y, si todo quedó vacío, usa el fallback
     const fb = fallback();
+    const habilidades = Object.fromEntries(
+      Object.entries(parsed.habilidades).filter(([, v]) => v.length)
+    );
     return {
-      resumen: typeof parsed.resumen === 'string' && parsed.resumen ? parsed.resumen : fb.resumen,
-      habilidades:
-        parsed.habilidades && typeof parsed.habilidades === 'object'
-          ? Object.fromEntries(
-              Object.entries(parsed.habilidades).filter(([, v]) => Array.isArray(v) && v.length)
-            )
-          : fb.habilidades,
-      proyectos: Array.isArray(parsed.proyectos) ? parsed.proyectos : fb.proyectos,
+      resumen: parsed.resumen,
+      habilidades: Object.keys(habilidades).length ? habilidades : fb.habilidades,
+      proyectos: parsed.proyectos.length ? parsed.proyectos : fb.proyectos,
     };
   } catch (err) {
     logger.warn({ err: err.message, telegramId: profile.telegramId }, 'structureCV cayó a fallback');

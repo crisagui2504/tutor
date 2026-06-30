@@ -13,6 +13,23 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# Secreto compartido con el bot Node. Si está vacío, la auth queda desactivada
+# (cómodo en local); en producción ponlo en ambos .env.
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
+
+
+@app.before_request
+def _check_api_key():
+    """Valida el header X-API-Key en todos los endpoints menos /health.
+
+    Solo se exige si API_SECRET_KEY está configurada; así local sigue simple.
+    """
+    if not API_SECRET_KEY or request.path == "/health":
+        return None
+    if request.headers.get("X-API-Key", "") != API_SECRET_KEY:
+        return jsonify({"error": "No autorizado"}), 401
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Endpoints

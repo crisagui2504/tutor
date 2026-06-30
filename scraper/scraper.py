@@ -1,8 +1,40 @@
 import time
+import json
 import random
 import requests
 from bs4 import BeautifulSoup
 from extractor import extract_skills, rank_skills
+
+
+def extract_jsonld_jobs(soup) -> list[str]:
+    """Extrae descripciones de vacantes desde <script type="application/ld+json">.
+
+    Muchos portales de empleo (OCC incluido) inyectan los datos de cada vacante
+    como JSON-LD estructurado (schema.org/JobPosting). Leer eso es mucho más
+    estable que depender de clases CSS de React, que cambian con cada rediseño.
+    """
+    textos = []
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        # El JSON-LD puede venir como objeto, lista o dentro de un @graph
+        if isinstance(data, list):
+            candidatos = data
+        elif isinstance(data, dict):
+            candidatos = data.get("@graph", [data])
+        else:
+            candidatos = []
+
+        for item in candidatos:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                titulo = item.get("title", "") or ""
+                desc = item.get("description", "") or ""
+                if titulo or desc:
+                    textos.append(f"{titulo} {desc}")
+    return textos
 
 HEADERS = {
     "User-Agent": (
@@ -137,25 +169,27 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
                 blocked = True
                 break
 
-            # Selectores en orden de especificidad para OCC
-            blocks = (
-                soup.select("article[data-testid]")           # OCC nuevo
-                or soup.select("article")                      # generico
-                or soup.select("[class*='VacancyCard']")       # componente React
-                or soup.select("[class*='vacancy-card']")
-                or soup.select("[class*='job-card']")
-                or soup.select("li[class*='vacancy']")
-                or soup.select("li[class*='job']")
-            )
+            # 1) Preferido: metadata estructurada JSON-LD (estable a cambios de DOM)
+            textos = extract_jsonld_jobs(soup)
+            fuente_pagina = "json-ld"
 
-            # Fallback: extrae el body completo de la pagina
-            if not blocks:
-                blocks = [soup.body] if soup.body else []
-                print(f"    ℹ️  Usando body completo como fallback")
+            # 2) Fallback: selectores CSS de OCC en orden de especificidad
+            if not textos:
+                blocks = (
+                    soup.select("article[data-testid]")           # OCC nuevo
+                    or soup.select("article")                      # generico
+                    or soup.select("[class*='VacancyCard']")       # componente React
+                    or soup.select("[class*='vacancy-card']")
+                    or soup.select("[class*='job-card']")
+                    or soup.select("li[class*='vacancy']")
+                    or soup.select("li[class*='job']")
+                    or ([soup.body] if soup.body else [])          # ultimo recurso
+                )
+                textos = [b.get_text(" ", strip=True) for b in blocks]
+                fuente_pagina = "css"
 
             hits = 0
-            for block in blocks:
-                text = block.get_text(" ", strip=True)
+            for text in textos:
                 if len(text) < 40:
                     continue
                 skills = extract_skills(text)
@@ -164,7 +198,7 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
                     total_jobs += 1
                     hits += 1
 
-            print(f"    Pág {page}: {hits} bloques con skills | total acumulado: {total_jobs}")
+            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | total: {total_jobs}")
 
         except requests.HTTPError as e:
             print(f"    HTTP {e.response.status_code} en pág {page}")

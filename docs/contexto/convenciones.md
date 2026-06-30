@@ -20,7 +20,7 @@
 
 ## Estilo Node.js
 
-- Sin punto y coma al final de línea (no hay linter configurado — [PENDIENTE: añadir ESLint])
+- Linter/formatter: **ESLint** (flat config, `eslint.config.js`) + **Prettier** (`.prettierrc.json`). Corre `npm run lint` y `npm run format`. Prettier manda en el estilo (comillas simples, punto y coma, ancho 100).
 - Arrow functions para callbacks cortos; `async function` con nombre para handlers de comandos
 - Mensajes de Telegram con template literals; `parse_mode: 'Markdown'` para negritas/cursivas
 - Límite de 4096 caracteres por mensaje Telegram: cortar si el plan supera la mitad del límite
@@ -60,9 +60,21 @@
 - Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
   `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
 
+## Comunicación entre servicios
+
+- Todas las llamadas Node→Python pasan por `src/bot/scraper_client.js` (URL base +
+  header `X-API-Key`). No hagas `fetch` directo al scraper desde los comandos.
+- El scraper valida `X-API-Key` contra `API_SECRET_KEY` (si está configurada).
+  Vacía = auth off (solo local). `/health` queda siempre abierto.
+
+## Validación de salida de LLM
+
+- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
+  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
+
 ## Tests
 
-[PENDIENTE: no hay tests. Si se añaden, usar Jest para Node y pytest para Python.]
+[PENDIENTE: no hay tests automatizados. Si se añaden, usar Jest para Node y pytest para Python. Lint con `npm run lint` y `ruff check scraper`.]
 
 ## Commits
 

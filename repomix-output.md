@@ -36,12 +36,15 @@ The content is organized as follows:
 ```
 .env.example
 .gitignore
+.prettierignore
+.prettierrc.json
 docs/contexto/arquitectura.md
 docs/contexto/convenciones.md
 docs/contexto/decisiones.md
 docs/contexto/errores-conocidos.md
 docs/contexto/flujo-de-trabajo.md
 docs/contexto/glosario.md
+eslint.config.js
 iniciar.bat
 package.json
 Procfile
@@ -51,6 +54,7 @@ scraper/becas.py
 scraper/extractor.py
 scraper/models.py
 scraper/requirements.txt
+scraper/ruff.toml
 scraper/scraper.py
 src/bot/cv_generator.js
 src/bot/cv_matcher.js
@@ -59,6 +63,7 @@ src/bot/onboarding.js
 src/bot/planner.js
 src/bot/progreso.js
 src/bot/scheduler.js
+src/bot/scraper_client.js
 src/bot/states.js
 src/config.js
 src/db.js
@@ -68,6 +73,109 @@ src/models/profile.js
 ```
 
 # Files
+
+## File: .prettierignore
+````
+node_modules
+repomix-output.md
+package-lock.json
+````
+
+## File: .prettierrc.json
+````json
+{
+  "singleQuote": true,
+  "semi": true,
+  "trailingComma": "es5",
+  "printWidth": 100,
+  "tabWidth": 2
+}
+````
+
+## File: eslint.config.js
+````javascript
+import js from '@eslint/js';
+import globals from 'globals';
+
+/**
+ * Config plana de ESLint (flat config). Reglas recomendadas + globals de Node.
+ * El formato lo maneja Prettier, así que aquí solo van reglas de correctitud.
+ */
+export default [
+  {
+    ignores: ['node_modules/**', 'repomix-output.md'],
+  },
+  js.configs.recommended,
+  {
+    files: ['src/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-console': 'off',
+    },
+  },
+];
+````
+
+## File: scraper/ruff.toml
+````toml
+# Configuración de Ruff (linter/formatter de Python).
+# Uso: pip install ruff && ruff check scraper   (o ruff format scraper)
+line-length = 100
+target-version = "py311"
+
+[lint]
+# E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # el largo de línea lo maneja el formatter
+````
+
+## File: src/bot/scraper_client.js
+````javascript
+import { config } from '../config.js';
+
+/**
+ * Cliente del scraper Python. Centraliza la URL base y la autenticación
+ * (header X-API-Key) para no repetirla en cada comando. Devuelve el objeto
+ * Response de fetch para que el caller maneje res.ok / res.json() como antes.
+ */
+function headers(extra = {}) {
+  const h = { ...extra };
+  if (config.apiSecret) h['X-API-Key'] = config.apiSecret;
+  return h;
+}
+
+/** GET /skills?especialidad=&limit= */
+export function scraperSkills(especialidad, limit = 5) {
+  const url = `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(especialidad)}&limit=${limit}`;
+  return fetch(url, { headers: headers() });
+}
+
+/** POST /scrape  body { especialidad } */
+export function scraperScrape(especialidad) {
+  return fetch(`${config.scraperUrl}/scrape`, {
+    method: 'POST',
+    headers: headers({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ especialidad }),
+  });
+}
+
+/** GET /becas?especialidad=&carrera=&limit= */
+export function scraperBecas(especialidad, carrera, limit = 5) {
+  const params = new URLSearchParams({
+    especialidad: especialidad || '',
+    carrera: carrera || '',
+    limit: String(limit),
+  });
+  return fetch(`${config.scraperUrl}/becas?${params}`, { headers: headers() });
+}
+````
 
 ## File: .env.example
 ````
@@ -84,6 +192,11 @@ NODE_ENV=development
 
 # Nivel de logs (trace | debug | info | warn | error) — opcional, default info
 LOG_LEVEL=info
+
+# --- Auth entre el bot (Node) y el scraper (Python) ---
+# Mismo valor en ambos lados. Vacío = auth desactivada (solo para local).
+# Genera uno con: node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
+API_SECRET_KEY=
 
 # --- Groq (LLM en la nube para /plan) ---
 # Consigue tu key gratis en https://console.groq.com (Settings > API Keys)
@@ -105,7 +218,6 @@ __pycache__/
 venv/
 
 # Artefactos generados
-repomix-output.*
 *.pdf
 ````
 
@@ -252,7 +364,7 @@ se filtra por especialidad, no por carrera.
 
 ## Estilo Node.js
 
-- Sin punto y coma al final de línea (no hay linter configurado — [PENDIENTE: añadir ESLint])
+- Linter/formatter: **ESLint** (flat config, `eslint.config.js`) + **Prettier** (`.prettierrc.json`). Corre `npm run lint` y `npm run format`. Prettier manda en el estilo (comillas simples, punto y coma, ancho 100).
 - Arrow functions para callbacks cortos; `async function` con nombre para handlers de comandos
 - Mensajes de Telegram con template literals; `parse_mode: 'Markdown'` para negritas/cursivas
 - Límite de 4096 caracteres por mensaje Telegram: cortar si el plan supera la mitad del límite
@@ -292,9 +404,21 @@ se filtra por especialidad, no por carrera.
 - Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
   `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
 
+## Comunicación entre servicios
+
+- Todas las llamadas Node→Python pasan por `src/bot/scraper_client.js` (URL base +
+  header `X-API-Key`). No hagas `fetch` directo al scraper desde los comandos.
+- El scraper valida `X-API-Key` contra `API_SECRET_KEY` (si está configurada).
+  Vacía = auth off (solo local). `/health` queda siempre abierto.
+
+## Validación de salida de LLM
+
+- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
+  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
+
 ## Tests
 
-[PENDIENTE: no hay tests. Si se añaden, usar Jest para Node y pytest para Python.]
+[PENDIENTE: no hay tests automatizados. Si se añaden, usar Jest para Node y pytest para Python. Lint con `npm run lint` y `ruff check scraper`.]
 
 ## Commits
 
@@ -658,7 +782,10 @@ pause
     "start": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first src/index.js\" \"py -X utf8 scraper/app.py\"",
     "bot": "node --dns-result-order=ipv4first src/index.js",
     "scraper": "py scraper/app.py",
-    "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\""
+    "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\"",
+    "lint": "eslint src",
+    "format": "prettier --write \"**/*.{js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{js,json,md}\""
   },
   "engines": {
     "node": ">=20"
@@ -671,10 +798,15 @@ pause
     "pdfkit": "^0.19.1",
     "pino": "^10.3.1",
     "pino-pretty": "^13.1.3",
-    "telegraf": "^4.16.3"
+    "telegraf": "^4.16.3",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "concurrently": "^10.0.3"
+    "@eslint/js": "^10.0.1",
+    "concurrently": "^10.0.3",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.4"
   }
 }
 ````
@@ -811,6 +943,23 @@ from becas import filtrar_becas
 load_dotenv()
 
 app = Flask(__name__)
+
+# Secreto compartido con el bot Node. Si está vacío, la auth queda desactivada
+# (cómodo en local); en producción ponlo en ambos .env.
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
+
+
+@app.before_request
+def _check_api_key():
+    """Valida el header X-API-Key en todos los endpoints menos /health.
+
+    Solo se exige si API_SECRET_KEY está configurada; así local sigue simple.
+    """
+    if not API_SECRET_KEY or request.path == "/health":
+        return None
+    if request.headers.get("X-API-Key", "") != API_SECRET_KEY:
+        return jsonify({"error": "No autorizado"}), 401
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1241,10 +1390,42 @@ python-dotenv==1.0.1
 ## File: scraper/scraper.py
 ````python
 import time
+import json
 import random
 import requests
 from bs4 import BeautifulSoup
 from extractor import extract_skills, rank_skills
+
+
+def extract_jsonld_jobs(soup) -> list[str]:
+    """Extrae descripciones de vacantes desde <script type="application/ld+json">.
+
+    Muchos portales de empleo (OCC incluido) inyectan los datos de cada vacante
+    como JSON-LD estructurado (schema.org/JobPosting). Leer eso es mucho más
+    estable que depender de clases CSS de React, que cambian con cada rediseño.
+    """
+    textos = []
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        # El JSON-LD puede venir como objeto, lista o dentro de un @graph
+        if isinstance(data, list):
+            candidatos = data
+        elif isinstance(data, dict):
+            candidatos = data.get("@graph", [data])
+        else:
+            candidatos = []
+
+        for item in candidatos:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                titulo = item.get("title", "") or ""
+                desc = item.get("description", "") or ""
+                if titulo or desc:
+                    textos.append(f"{titulo} {desc}")
+    return textos
 
 HEADERS = {
     "User-Agent": (
@@ -1379,25 +1560,27 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
                 blocked = True
                 break
 
-            # Selectores en orden de especificidad para OCC
-            blocks = (
-                soup.select("article[data-testid]")           # OCC nuevo
-                or soup.select("article")                      # generico
-                or soup.select("[class*='VacancyCard']")       # componente React
-                or soup.select("[class*='vacancy-card']")
-                or soup.select("[class*='job-card']")
-                or soup.select("li[class*='vacancy']")
-                or soup.select("li[class*='job']")
-            )
+            # 1) Preferido: metadata estructurada JSON-LD (estable a cambios de DOM)
+            textos = extract_jsonld_jobs(soup)
+            fuente_pagina = "json-ld"
 
-            # Fallback: extrae el body completo de la pagina
-            if not blocks:
-                blocks = [soup.body] if soup.body else []
-                print(f"    ℹ️  Usando body completo como fallback")
+            # 2) Fallback: selectores CSS de OCC en orden de especificidad
+            if not textos:
+                blocks = (
+                    soup.select("article[data-testid]")           # OCC nuevo
+                    or soup.select("article")                      # generico
+                    or soup.select("[class*='VacancyCard']")       # componente React
+                    or soup.select("[class*='vacancy-card']")
+                    or soup.select("[class*='job-card']")
+                    or soup.select("li[class*='vacancy']")
+                    or soup.select("li[class*='job']")
+                    or ([soup.body] if soup.body else [])          # ultimo recurso
+                )
+                textos = [b.get_text(" ", strip=True) for b in blocks]
+                fuente_pagina = "css"
 
             hits = 0
-            for block in blocks:
-                text = block.get_text(" ", strip=True)
+            for text in textos:
                 if len(text) < 40:
                     continue
                 skills = extract_skills(text)
@@ -1406,7 +1589,7 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
                     total_jobs += 1
                     hits += 1
 
-            print(f"    Pág {page}: {hits} bloques con skills | total acumulado: {total_jobs}")
+            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | total: {total_jobs}")
 
         except requests.HTTPError as e:
             print(f"    HTTP {e.response.status_code} en pág {page}")
@@ -1440,10 +1623,24 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
 ## File: src/bot/cv_generator.js
 ````javascript
 import PDFDocument from 'pdfkit';
+import { z } from 'zod';
 import { config } from '../config.js';
 import { logger } from '../logger.js';
 import { STATES } from './states.js';
 import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+// Esquema esperado de la respuesta de Groq para el CV. Tolera campos extra y
+// descripción ausente; rechaza cuando faltan los obligatorios o cambian de tipo.
+const CV_SCHEMA = z.object({
+  resumen: z.string().min(1),
+  habilidades: z.record(z.string(), z.array(z.string())),
+  proyectos: z.array(
+    z.object({
+      titulo: z.string().min(1),
+      descripcion: z.string().default(''),
+    })
+  ),
+});
 
 /**
  * Generador de CV estilo Harvard.
@@ -1629,19 +1826,25 @@ Reglas: categoriza cada habilidad en su grupo (omite grupos vacíos). Para proye
     if (!res.ok) throw new Error(`Groq ${res.status}`);
     const data = await res.json();
     const raw = data.choices?.[0]?.message?.content ?? '';
-    const parsed = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+    const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
 
-    // Valida forma mínima; si algo falta, completa con el fallback
+    // Valida la forma con Zod: si Groq cambia el formato, esto lo detecta y
+    // caemos al fallback en vez de meter basura al PDF.
+    const result = CV_SCHEMA.safeParse(json);
+    if (!result.success) {
+      throw new Error(`Forma inválida: ${result.error.issues[0]?.message}`);
+    }
+    const parsed = result.data;
+
+    // Quita categorías de skills vacías y, si todo quedó vacío, usa el fallback
     const fb = fallback();
+    const habilidades = Object.fromEntries(
+      Object.entries(parsed.habilidades).filter(([, v]) => v.length)
+    );
     return {
-      resumen: typeof parsed.resumen === 'string' && parsed.resumen ? parsed.resumen : fb.resumen,
-      habilidades:
-        parsed.habilidades && typeof parsed.habilidades === 'object'
-          ? Object.fromEntries(
-              Object.entries(parsed.habilidades).filter(([, v]) => Array.isArray(v) && v.length)
-            )
-          : fb.habilidades,
-      proyectos: Array.isArray(parsed.proyectos) ? parsed.proyectos : fb.proyectos,
+      resumen: parsed.resumen,
+      habilidades: Object.keys(habilidades).length ? habilidades : fb.habilidades,
+      proyectos: parsed.proyectos.length ? parsed.proyectos : fb.proyectos,
     };
   } catch (err) {
     logger.warn({ err: err.message, telegramId: profile.telegramId }, 'structureCV cayó a fallback');
@@ -2405,7 +2608,7 @@ import cron from 'node-cron';
 import { Markup } from 'telegraf';
 import { Profile } from '../models/profile.js';
 import { matchSkills, recordScore } from './cv_matcher.js';
-import { config } from '../config.js';
+import { scraperSkills } from './scraper_client.js';
 import { logger } from '../logger.js';
 
 /**
@@ -2446,9 +2649,7 @@ async function monthlyRescore(bot) {
       // Los perfiles viejos sin especialidad se saltan (se migran al usar el bot)
       if (!profile.especialidad) continue;
 
-      const res = await fetch(
-        `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=10`
-      );
+      const res = await scraperSkills(profile.especialidad, 10);
       if (!res.ok) continue;
 
       const data = await res.json();
@@ -2562,6 +2763,9 @@ export const config = {
   groqKey: process.env.GROQ_API_KEY || '',
   env: process.env.NODE_ENV || 'development',
   scraperUrl: process.env.SCRAPER_URL || 'http://localhost:5001',
+  // Secreto compartido Node<->Flask. Si está vacío, la auth queda desactivada
+  // (cómodo en local); en producción ponlo en ambos .env.
+  apiSecret: process.env.API_SECRET_KEY || '',
 };
 ````
 
@@ -2605,6 +2809,7 @@ import { generatePlan } from './bot/planner.js';
 import { generarGraficaProgreso } from './bot/progreso.js';
 import { startScheduler } from './bot/scheduler.js';
 import { cvSteps, generarCV } from './bot/cv_generator.js';
+import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -2703,18 +2908,12 @@ bot.command('mercado', async (ctx) => {
 
   try {
     // Primero dispara el scrape para que haya datos
-    const scrapeRes = await fetch(`${config.scraperUrl}/scrape`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ especialidad: profile.especialidad }),
-    });
+    const scrapeRes = await scraperScrape(profile.especialidad);
 
     if (!scrapeRes.ok) throw new Error(`Scraper respondió ${scrapeRes.status}`);
 
     // Luego pide el ranking
-    const res = await fetch(
-      `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=5`
-    );
+    const res = await scraperSkills(profile.especialidad, 5);
     const data = await res.json();
 
     if (!res.ok || !data.skills?.length) {
@@ -2753,9 +2952,7 @@ bot.command('plan', async (ctx) => {
 
   try {
     // Obtiene las brechas actuales del mercado de su especialidad
-    const res = await fetch(
-      `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=10`
-    );
+    const res = await scraperSkills(profile.especialidad, 10);
     if (!res.ok) {
       return ctx.reply('Usa /mercado primero para obtener datos del mercado.');
     }
@@ -2829,12 +3026,7 @@ bot.command('becas', async (ctx) => {
   await ctx.reply('🔍 Buscando becas para tu perfil...');
 
   try {
-    const params = new URLSearchParams({
-      especialidad: profile.especialidad || '',
-      carrera: profile.carrera || '',
-      limit: '5',
-    });
-    const res = await fetch(`${config.scraperUrl}/becas?${params}`);
+    const res = await scraperBecas(profile.especialidad, profile.carrera, 5);
     const data = await res.json();
 
     if (!res.ok || !data.becas?.length) {
@@ -2883,9 +3075,7 @@ bot.command(['micv', 'miCV'], async (ctx) => {
   await ctx.reply('🔍 Analizando tu CV contra el mercado de tu especialidad...');
 
   try {
-    const res = await fetch(
-      `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(profile.especialidad)}&limit=10`
-    );
+    const res = await scraperSkills(profile.especialidad, 10);
 
     if (!res.ok) {
       return ctx.reply('No hay datos del mercado aún. Usa /mercado primero.');

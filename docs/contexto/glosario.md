@@ -63,6 +63,7 @@
 | `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
 | `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
 | `/plan` | Plan de estudios de 8 semanas con Groq |
+| `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
 | `/becas` | Becas filtradas por carrera con días restantes |
 | `/progreso` | Gráfica ASCII del historial de scores |
 | `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |

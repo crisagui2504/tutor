@@ -18,6 +18,7 @@ import { startScheduler } from './bot/scheduler.js';
 import { cvSteps, generarCV } from './bot/cv_generator.js';
 import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client.js';
 import { ESPECIALIDADES } from './bot/especialidades.js';
+import { iniciarQuiz, responderQuiz } from './bot/quiz.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -399,6 +400,40 @@ bot.command('comparar', async (ctx) => {
     await ctx.reply('Hubo un error al comparar. Intenta más tarde.');
   }
 });
+
+// /quiz — quiz interactivo corto (refuerza el plan, feedback inmediato)
+bot.command('quiz', async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  if (isRateLimited(ctx.from.id, 'quiz', 30)) {
+    return ctx.reply('Espera unos segundos antes de pedir otro quiz ⏳');
+  }
+  if (!(await requireEspecialidad(ctx, profile))) return;
+
+  await ctx.sendChatAction('typing');
+  await ctx.reply('🧠 Preparando tu quiz...');
+  try {
+    // Pregunta sobre lo que le falta del mercado (refuerza el plan); si no falta
+    // nada, sobre lo que ya tiene
+    const res = await scraperSkills(profile.especialidad, 10);
+    const data = res.ok ? await res.json() : { skills: [] };
+    const { missing } = matchSkills(profile.habilidades, data.skills || []);
+    const base = missing.length ? missing : profile.habilidades;
+    const temas = base.slice(0, 3);
+    if (!temas.length) {
+      return ctx.reply('Agrega habilidades con /habilidades para armar tu quiz 🙂');
+    }
+    await iniciarQuiz(ctx, profile, temas);
+  } catch (err) {
+    logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /quiz');
+    await ctx.reply('No pude crear el quiz ahora. Intenta de nuevo en un momento.');
+  }
+});
+
+// Respuestas del quiz (botones inline: data "quiz:<pregunta>:<opcion>")
+bot.action(/^quiz:(\d+):(\d+)$/, responderQuiz);
 
 // /perfil — muestra lo que el bot sabe de ti
 bot.command('perfil', async (ctx) => {

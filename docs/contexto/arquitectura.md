@@ -107,6 +107,8 @@ capturando una rebanada más realista del mercado que un solo slug.
 | `GET /skills` | `?especialidad=&limit=` — nunca 404: si no hay ranking, cae a SEED_DATA |
 | `GET /becas` | `?especialidad=&carrera=&limit=` |
 | `GET /especialidades` | (lista las que tienen ranking) |
+| `GET /metrics` | métricas de uso en JSON (agrega la colección `profiles`) |
+| `GET /dashboard` | dashboard HTML server-rendered; en navegador usar `?key=<API_SECRET_KEY>` |
 
 ## Qué NO existe
 
@@ -115,7 +117,7 @@ capturando una rebanada más realista del mercado que un solo slug.
 - Rate limiting en el bot o en la API Flask
 - Caché en memoria (Redis, etc.)
 - Google Calendar integration (mencionada en README, no implementada)
-- Panel de administración o dashboard
+- Panel de administración con autenticación de usuarios (sí hay un `/dashboard` de métricas protegido por API key)
 - Logs estructurados / observabilidad (solo console.log / print)
 - Multilenguaje (solo español)
 - Variables de entorno en producción cloud (Railway no configurado todavía)

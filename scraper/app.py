@@ -6,7 +6,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 from scraper import scrape_occ, SEED_DATA, DEFAULT_SEED
-from models import save_ranking, get_ranking, list_especialidades
+from models import save_ranking, get_ranking, list_especialidades, metricas
 from becas import filtrar_becas
 
 load_dotenv()
@@ -26,7 +26,9 @@ def _check_api_key():
     """
     if not API_SECRET_KEY or request.path == "/health":
         return None
-    if request.headers.get("X-API-Key", "") != API_SECRET_KEY:
+    # Acepta la key por header (bot) o por query param ?key= (dashboard en navegador)
+    provided = request.headers.get("X-API-Key", "") or request.args.get("key", "")
+    if provided != API_SECRET_KEY:
         return jsonify({"error": "No autorizado"}), 401
     return None
 
@@ -114,6 +116,81 @@ def scrape():
 @app.get("/especialidades")
 def especialidades():
     return jsonify({"especialidades": list_especialidades()})
+
+
+# --- Dashboard de métricas --------------------------------------------------
+
+ESP_LABEL = {
+    "desarrollo-web": "🌐 Desarrollo Web",
+    "datos-ia": "📊 Datos e IA",
+    "ciberseguridad": "🔐 Ciberseguridad",
+    "devops-cloud": "☁️ DevOps y Cloud",
+    "redes": "🖧 Redes",
+}
+
+
+@app.get("/metrics")
+def metrics():
+    """Métricas de uso en JSON (para scripts/monitoreo)."""
+    return jsonify(metricas())
+
+
+@app.get("/dashboard")
+def dashboard():
+    """Dashboard HTML simple (server-rendered, sin JS)."""
+    m = metricas()
+    pct = round(m["onboarding_completos"] / m["usuarios"] * 100) if m["usuarios"] else 0
+    max_users = max((e["usuarios"] for e in m["especialidades"]), default=1) or 1
+
+    filas = ""
+    for e in m["especialidades"]:
+        label = ESP_LABEL.get(e["especialidad"], e["especialidad"])
+        ancho = round(e["usuarios"] / max_users * 100)
+        filas += f"""
+        <tr>
+          <td>{label}</td>
+          <td><div class="bar"><span style="width:{ancho}%"></span></div>{e['usuarios']}</td>
+          <td>{e['score_prom']}%</td>
+          <td>{e['puntos_prom']}</td>
+        </tr>"""
+
+    if not filas:
+        filas = '<tr><td colspan="4" class="empty">Aún no hay perfiles con especialidad.</td></tr>'
+
+    html = f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asistente de Carrera — Métricas</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background:#0f1115; color:#e6e6e6; margin:0; padding:32px; }}
+  h1 {{ font-size:1.4rem; margin:0 0 4px; }}
+  .sub {{ color:#8a8f98; margin-bottom:24px; }}
+  .cards {{ display:flex; flex-wrap:wrap; gap:16px; margin-bottom:28px; }}
+  .card {{ background:#1a1d24; border:1px solid #272b34; border-radius:12px; padding:18px 22px; min-width:140px; }}
+  .card .n {{ font-size:2rem; font-weight:700; }}
+  .card .l {{ color:#8a8f98; font-size:.85rem; }}
+  table {{ width:100%; border-collapse:collapse; background:#1a1d24; border-radius:12px; overflow:hidden; }}
+  th,td {{ text-align:left; padding:12px 16px; border-bottom:1px solid #272b34; }}
+  th {{ color:#8a8f98; font-weight:600; font-size:.85rem; }}
+  .bar {{ display:inline-block; width:120px; height:8px; background:#272b34; border-radius:4px; margin-right:8px; vertical-align:middle; }}
+  .bar span {{ display:block; height:100%; background:#5b8def; border-radius:4px; }}
+  .empty {{ color:#8a8f98; text-align:center; }}
+</style></head>
+<body>
+  <h1>📈 Asistente de Carrera — Métricas</h1>
+  <div class="sub">Datos en vivo desde MongoDB</div>
+  <div class="cards">
+    <div class="card"><div class="n">{m['usuarios']}</div><div class="l">Usuarios</div></div>
+    <div class="card"><div class="n">{pct}%</div><div class="l">Onboarding completo</div></div>
+    <div class="card"><div class="n">{m['puntos_totales']}</div><div class="l">Puntos totales</div></div>
+    <div class="card"><div class="n">{m['racha_maxima']}</div><div class="l">Racha máxima</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Especialidad</th><th>Usuarios</th><th>Score prom.</th><th>Puntos prom.</th></tr></thead>
+    <tbody>{filas}</tbody>
+  </table>
+</body></html>"""
+    return html
 
 
 @app.get("/becas")

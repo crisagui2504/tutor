@@ -82,472 +82,6 @@ tests/progreso.test.js
 
 # Files
 
-## File: scraper/test_logic.py
-````python
-"""Tests de la lógica pura del scraper (sin red ni base de datos).
-
-Correr con:  cd scraper && python -m pytest   (o: python -m pytest scraper)
-"""
-from bs4 import BeautifulSoup
-
-from extractor import extract_skills, rank_skills
-from scraper import (
-    especialidad_to_occ_queries,
-    extract_jsonld_jobs,
-    scrape_occ,
-    SEED_DATA,
-)
-from becas import filtrar_becas, dias_restantes
-
-
-# --- extractor ---------------------------------------------------------------
-
-def test_extract_skills_encuentra_por_palabra():
-    skills = extract_skills("Buscamos Python, SQL y Docker. React deseable.")
-    assert "Python" in skills
-    assert "SQL" in skills
-    assert "Docker" in skills
-
-
-def test_extract_skills_sin_falsos_positivos():
-    # 'java' no debe matchear dentro de 'javascript'
-    skills = extract_skills("Experiencia en JavaScript")
-    assert "JavaScript" in skills
-    assert "Java" not in skills
-
-
-def test_rank_skills_ordena_por_frecuencia():
-    listas = [["Python", "SQL"], ["Python"], ["Python", "Docker"]]
-    ranking = rank_skills(listas, top_n=5)
-    assert ranking[0]["skill"] == "Python"
-    assert ranking[0]["count"] == 3
-    assert ranking[0]["pct"] == 100
-
-
-# --- mapeo de especialidades -------------------------------------------------
-
-def test_especialidad_to_occ_queries_devuelve_lista():
-    qs = especialidad_to_occ_queries("datos-ia")
-    assert isinstance(qs, list)
-    assert "data-scientist" in qs
-    assert len(qs) >= 2
-
-
-def test_especialidad_desconocida_cae_a_default():
-    assert especialidad_to_occ_queries("nope") == ["desarrollador-web"]
-
-
-def test_seed_data_tiene_las_cinco_especialidades():
-    for esp in ["desarrollo-web", "datos-ia", "ciberseguridad", "devops-cloud", "redes"]:
-        assert esp in SEED_DATA
-        assert len(SEED_DATA[esp]) >= 5
-
-
-# --- JSON-LD -----------------------------------------------------------------
-
-def test_extract_jsonld_jobs_objeto_lista_y_graph():
-    html = """
-    <script type="application/ld+json">{"@type":"JobPosting","title":"Dev","description":"Python Django"}</script>
-    <script type="application/ld+json">[{"@type":"JobPosting","title":"Data","description":"SQL"}]</script>
-    <script type="application/ld+json">{"@graph":[{"@type":"WebSite"},{"@type":"JobPosting","title":"Ops","description":"Docker"}]}</script>
-    <script type="application/ld+json">no es json</script>
-    """
-    jobs = extract_jsonld_jobs(BeautifulSoup(html, "html.parser"))
-    assert len(jobs) == 3
-    assert any("Django" in j for j in jobs)
-
-
-def test_extract_jsonld_ignora_no_jobposting():
-    html = '<script type="application/ld+json">{"@type":"Organization","name":"X"}</script>'
-    assert extract_jsonld_jobs(BeautifulSoup(html, "html.parser")) == []
-
-
-# --- scrape_occ: combinación de múltiples queries ---------------------------
-
-def test_scrape_occ_combina_queries(monkeypatch):
-    llamadas = []
-
-    def fake(session, query, max_pages):
-        llamadas.append(query)
-        return [["Python", "SQL"]], 5, False
-
-    monkeypatch.setattr("scraper._scrape_query", fake)
-    r = scrape_occ("datos-ia")
-    assert llamadas == ["data-scientist", "analista-de-datos", "data-engineer"]
-    assert r["total_jobs"] == 15  # 3 queries x 5
-    assert r["source"] == "live"
-
-
-def test_scrape_occ_bloqueo_corta_y_cae_a_seed(monkeypatch):
-    llamadas = []
-
-    def fake_block(session, query, max_pages):
-        llamadas.append(query)
-        return [], 0, True
-
-    monkeypatch.setattr("scraper._scrape_query", fake_block)
-    r = scrape_occ("ciberseguridad")
-    assert len(llamadas) == 1  # cortó al primer bloqueo
-    assert r["source"] == "seed"
-
-
-# --- becas -------------------------------------------------------------------
-
-def test_dias_restantes_no_negativo():
-    assert dias_restantes("2000-01-01") == 0  # fecha pasada -> 0
-    assert dias_restantes("basura") == 999
-
-
-def test_filtrar_becas_prioriza_especialidad():
-    becas = filtrar_becas("datos-ia", "ing en sistemas", 5)
-    assert len(becas) > 0
-    # la primera debe ser específica de datos-ia o genérica, nunca irrelevante
-    primera = becas[0]
-    assert "datos-ia" in primera["especialidades"] or "*" in primera["especialidades"]
-    # todas traen dias_restantes calculado
-    assert all("dias_restantes" in b for b in becas)
-````
-
-## File: tests/cv_matcher.test.js
-````javascript
-import { describe, it, expect } from 'vitest';
-import {
-  matchSkills,
-  recordScore,
-  proyectarEscenarios,
-} from '../src/bot/cv_matcher.js';
-
-const market = [
-  { skill: 'Python' },
-  { skill: 'SQL' },
-  { skill: 'Pandas' },
-  { skill: 'Machine Learning' },
-  { skill: 'Power BI' },
-  { skill: 'NumPy' },
-  { skill: 'Scikit-learn' },
-  { skill: 'TensorFlow' },
-  { skill: 'Tableau' },
-  { skill: 'inglés' },
-];
-
-describe('matchSkills', () => {
-  it('calcula score y separa have/missing', () => {
-    const { score, have, missing } = matchSkills(['Python', 'SQL'], market);
-    expect(score).toBe(20);
-    expect(have).toEqual(['Python', 'SQL']);
-    expect(missing).toContain('Pandas');
-    expect(have.length + missing.length).toBe(market.length);
-  });
-
-  it('normaliza aliases (js -> JavaScript, py -> Python)', () => {
-    const m = [{ skill: 'JavaScript' }, { skill: 'Python' }];
-    const { score } = matchSkills(['js', 'py'], m);
-    expect(score).toBe(100);
-  });
-
-  it('da 0 cuando no hay coincidencias', () => {
-    expect(matchSkills(['Cobol'], market).score).toBe(0);
-  });
-});
-
-describe('recordScore (dedup por mes y especialidad)', () => {
-  it('agrega una entrada nueva', () => {
-    const p = { cvScores: [] };
-    recordScore(p, 40, 'datos-ia');
-    expect(p.cvScores).toHaveLength(1);
-    expect(p.cvScores[0]).toMatchObject({ score: 40, especialidad: 'datos-ia' });
-  });
-
-  it('actualiza la entrada del mismo mes+especialidad en vez de duplicar', () => {
-    const p = { cvScores: [] };
-    recordScore(p, 40, 'datos-ia');
-    recordScore(p, 55, 'datos-ia');
-    expect(p.cvScores).toHaveLength(1);
-    expect(p.cvScores[0].score).toBe(55);
-  });
-
-  it('separa por especialidad distinta el mismo mes', () => {
-    const p = { cvScores: [] };
-    recordScore(p, 40, 'datos-ia');
-    recordScore(p, 30, 'ciberseguridad');
-    expect(p.cvScores).toHaveLength(2);
-  });
-
-  it('mantiene máximo 12 entradas al crecer (quita la más vieja)', () => {
-    const p = { cvScores: [] };
-    // 13 entradas distintas (especialidad distinta = no se deduplican)
-    for (let i = 0; i < 13; i++) recordScore(p, i, `esp-${i}`);
-    expect(p.cvScores).toHaveLength(12);
-    expect(p.cvScores.some((s) => s.especialidad === 'esp-0')).toBe(false); // la vieja salió
-  });
-});
-
-describe('proyectarEscenarios (forecasted self)', () => {
-  it('proyecta el score sumando las skills más demandadas', () => {
-    const proy = proyectarEscenarios(['Python', 'SQL'], market, 3);
-    expect(proy.actual).toBe(20);
-    expect(proy.escenarios).toHaveLength(3);
-    expect(proy.escenarios[0]).toMatchObject({ skill: 'Pandas', score: 30, delta: 10 });
-    expect(proy.escenarios.at(-1).score).toBe(50);
-  });
-
-  it('marca sinFaltantes cuando ya tiene todo', () => {
-    const todo = market.map((m) => m.skill);
-    const proy = proyectarEscenarios(todo, market, 3);
-    expect(proy.sinFaltantes).toBe(true);
-    expect(proy.escenarios).toHaveLength(0);
-  });
-
-  it('respeta el límite "hasta" y no excede las faltantes', () => {
-    const proy = proyectarEscenarios(market.slice(0, 9).map((m) => m.skill), market, 3);
-    expect(proy.escenarios).toHaveLength(1); // solo falta 1
-  });
-});
-````
-
-## File: tests/especialidades.test.js
-````javascript
-import { describe, it, expect } from 'vitest';
-import {
-  ESPECIALIDADES,
-  OBJETIVOS,
-  parseSeleccion,
-  renderMenu,
-  labelDe,
-} from '../src/bot/especialidades.js';
-
-describe('parseSeleccion', () => {
-  it('interpreta por número (1-based)', () => {
-    expect(parseSeleccion('2', ESPECIALIDADES)).toBe(ESPECIALIDADES[1].key);
-  });
-
-  it('interpreta por texto/keyword', () => {
-    expect(parseSeleccion('datos', ESPECIALIDADES)).toBe('datos-ia');
-  });
-
-  it('devuelve null para entrada inválida', () => {
-    expect(parseSeleccion('99', ESPECIALIDADES)).toBeNull();
-    expect(parseSeleccion('xyz', ESPECIALIDADES)).toBeNull();
-  });
-
-  it('funciona con otra lista (objetivos)', () => {
-    expect(parseSeleccion('1', OBJETIVOS)).toBe(OBJETIVOS[0].key);
-  });
-});
-
-describe('renderMenu', () => {
-  it('numera las opciones desde 1', () => {
-    const menu = renderMenu(OBJETIVOS);
-    expect(menu).toContain('1.');
-    expect(menu.split('\n')).toHaveLength(OBJETIVOS.length);
-  });
-});
-
-describe('labelDe', () => {
-  it('devuelve la etiqueta legible de una key', () => {
-    expect(labelDe('datos-ia', ESPECIALIDADES)).toContain('Datos');
-  });
-
-  it('devuelve la key si no la encuentra', () => {
-    expect(labelDe('inexistente', ESPECIALIDADES)).toBe('inexistente');
-  });
-});
-````
-
-## File: tests/gamificacion.test.js
-````javascript
-import { describe, it, expect } from 'vitest';
-import {
-  nivel,
-  otorgarPuntos,
-  actualizarRacha,
-  formatPuntos,
-} from '../src/bot/gamificacion.js';
-
-describe('nivel', () => {
-  it('es 1 con 0-99 puntos y sube cada 100', () => {
-    expect(nivel(0)).toBe(1);
-    expect(nivel(99)).toBe(1);
-    expect(nivel(100)).toBe(2);
-    expect(nivel(250)).toBe(3);
-  });
-
-  it('tolera undefined', () => {
-    expect(nivel(undefined)).toBe(1);
-  });
-});
-
-describe('otorgarPuntos', () => {
-  it('suma puntos y detecta subida de nivel', () => {
-    const p = { puntos: 80 };
-    const r = otorgarPuntos(p, 50);
-    expect(p.puntos).toBe(130);
-    expect(r.total).toBe(130);
-    expect(r.subioNivel).toBe(true);
-    expect(r.nivel).toBe(2);
-  });
-
-  it('no marca subida si no cruza el umbral', () => {
-    const p = { puntos: 10 };
-    const r = otorgarPuntos(p, 30);
-    expect(r.subioNivel).toBe(false);
-  });
-
-  it('arranca desde 0 si puntos es undefined', () => {
-    const p = {};
-    otorgarPuntos(p, 10);
-    expect(p.puntos).toBe(10);
-  });
-});
-
-describe('actualizarRacha', () => {
-  it('incrementa con éxito y guarda fecha', () => {
-    const p = { racha: 2 };
-    expect(actualizarRacha(p, true)).toBe(3);
-    expect(p.ultimaActividad).toBeInstanceOf(Date);
-  });
-
-  it('reinicia a 0 al fallar', () => {
-    const p = { racha: 5 };
-    expect(actualizarRacha(p, false)).toBe(0);
-  });
-});
-
-describe('formatPuntos', () => {
-  it('incluye puntos, nivel y racha', () => {
-    const msg = formatPuntos({ puntos: 130, racha: 3 });
-    expect(msg).toContain('130');
-    expect(msg).toContain('Nivel *2*');
-    expect(msg).toContain('3');
-  });
-});
-````
-
-## File: tests/onboarding.test.js
-````javascript
-import { describe, it, expect } from 'vitest';
-import { steps } from '../src/bot/onboarding.js';
-import { STATES } from '../src/bot/states.js';
-
-describe('FSM onboarding — validaciones y transiciones', () => {
-  it('ASK_NOMBRE rechaza nombres muy cortos', () => {
-    const r = steps[STATES.ASK_NOMBRE].handle('a', {});
-    expect(r.ok).toBe(false);
-  });
-
-  it('ASK_NOMBRE acepta y avanza a CARRERA', () => {
-    const p = {};
-    const r = steps[STATES.ASK_NOMBRE].handle('Cristian', p);
-    expect(r).toMatchObject({ ok: true, next: STATES.ASK_CARRERA });
-    expect(p.nombre).toBe('Cristian');
-  });
-
-  it('ASK_SEMESTRE solo acepta 1-14', () => {
-    expect(steps[STATES.ASK_SEMESTRE].handle('0', {}).ok).toBe(false);
-    expect(steps[STATES.ASK_SEMESTRE].handle('15', {}).ok).toBe(false);
-    expect(steps[STATES.ASK_SEMESTRE].handle('6', {}).ok).toBe(true);
-  });
-
-  it('ASK_PROMEDIO acepta coma decimal y rango 0-10', () => {
-    const p = {};
-    expect(steps[STATES.ASK_PROMEDIO].handle('8,5', p).ok).toBe(true);
-    expect(p.promedio).toBe(8.5);
-    expect(steps[STATES.ASK_PROMEDIO].handle('11', {}).ok).toBe(false);
-  });
-
-  it('ASK_ESPECIALIDAD: número selecciona, "aún no lo sé" cae al default', () => {
-    const p = {};
-    steps[STATES.ASK_ESPECIALIDAD].handle('2', p);
-    expect(p.especialidad).toBeTruthy();
-    const p2 = {};
-    steps[STATES.ASK_ESPECIALIDAD].handle('6', p2); // opción extra
-    expect(p2.especialidad).toBe('desarrollo-web');
-  });
-
-  it('ASK_HABILIDADES parte por comas y filtra vacíos', () => {
-    const p = {};
-    const r = steps[STATES.ASK_HABILIDADES].handle('Python, , SQL ,Git', p);
-    expect(r.ok).toBe(true);
-    expect(p.habilidades).toEqual(['Python', 'SQL', 'Git']);
-    expect(r.next).toBe(STATES.ASK_NIVEL);
-  });
-
-  it('ASK_HORARIO parsea día + rango y vuelve a tolerar acentos', () => {
-    const p = {};
-    const r = steps[STATES.ASK_HORARIO].handle('lunes 19:00-21:00, sábado 09:00-13:00', p);
-    expect(r.ok).toBe(true);
-    expect(p.horario).toMatchObject({ lunes: '19:00-21:00', sabado: '09:00-13:00' });
-    expect(r.next).toBe(STATES.DONE);
-  });
-
-  it('ASK_HORARIO rechaza texto sin horario válido', () => {
-    expect(steps[STATES.ASK_HORARIO].handle('cuando pueda', {}).ok).toBe(false);
-  });
-
-  it('EDIT_HABILIDADES vuelve a DONE (no continúa el onboarding)', () => {
-    const r = steps[STATES.EDIT_HABILIDADES].handle('React, Docker', {});
-    expect(r.next).toBe(STATES.DONE);
-  });
-});
-````
-
-## File: tests/progreso.test.js
-````javascript
-import { describe, it, expect } from 'vitest';
-import { generarGraficaProgreso } from '../src/bot/progreso.js';
-
-describe('generarGraficaProgreso', () => {
-  it('muestra mensaje cuando no hay historial', () => {
-    expect(generarGraficaProgreso([], 'datos-ia')).toContain('Aún no tienes historial');
-  });
-
-  it('filtra por la especialidad actual', () => {
-    const scores = [
-      { score: 50, fecha: new Date('2026-05-01'), especialidad: 'datos-ia' },
-      { score: 30, fecha: new Date('2026-05-01'), especialidad: 'ciberseguridad' },
-    ];
-    const g = generarGraficaProgreso(scores, 'datos-ia');
-    expect(g).toContain('50%');
-    expect(g).not.toContain('30%');
-  });
-
-  it('incluye entradas viejas sin especialidad (compat hacia atrás)', () => {
-    const scores = [{ score: 42, fecha: new Date('2026-04-01') }];
-    expect(generarGraficaProgreso(scores, 'datos-ia')).toContain('42%');
-  });
-
-  it('calcula la tendencia entre primera y última medición', () => {
-    const scores = [
-      { score: 20, fecha: new Date('2026-03-01'), especialidad: 'x' },
-      { score: 50, fecha: new Date('2026-05-01'), especialidad: 'x' },
-    ];
-    const g = generarGraficaProgreso(scores, 'x');
-    expect(g).toContain('+30%');
-  });
-});
-````
-
-## File: .gitignore
-````
-node_modules/
-.env
-*.log
-.DS_Store
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-.pytest_cache/
-
-# Cobertura de tests
-coverage/
-
-# Artefactos generados
-*.pdf
-````
-
 ## File: .prettierignore
 ````
 node_modules
@@ -1246,6 +780,61 @@ except Exception:
 _client = MongoClient(os.environ["MONGODB_URI"])
 _db = _client.get_default_database()
 _rankings = _db["skill_rankings"]
+_profiles = _db["profiles"]  # lo escribe el bot Node (mongoose), aquí solo se lee
+
+
+def metricas() -> dict:
+    """Agrega métricas de uso del bot desde la colección de perfiles."""
+    total = _profiles.count_documents({})
+    completos = _profiles.count_documents({"onboardingCompleto": True})
+
+    # Distribución y puntos promedio por especialidad
+    dist = list(_profiles.aggregate([
+        {"$match": {"especialidad": {"$nin": [None, ""]}}},
+        {"$group": {
+            "_id": "$especialidad",
+            "usuarios": {"$sum": 1},
+            "puntos_prom": {"$avg": "$puntos"},
+        }},
+        {"$sort": {"usuarios": -1}},
+    ]))
+
+    # Score promedio por especialidad (último score de cada usuario)
+    scores = list(_profiles.aggregate([
+        {"$match": {"cvScores.0": {"$exists": True}}},
+        {"$project": {
+            "especialidad": 1,
+            "ultimo": {"$arrayElemAt": ["$cvScores.score", -1]},
+        }},
+        {"$group": {"_id": "$especialidad", "score_prom": {"$avg": "$ultimo"}}},
+    ]))
+    score_map = {s["_id"]: round(s.get("score_prom") or 0) for s in scores}
+
+    # Totales globales
+    glob = list(_profiles.aggregate([
+        {"$group": {
+            "_id": None,
+            "puntos_totales": {"$sum": "$puntos"},
+            "racha_maxima": {"$max": "$racha"},
+        }},
+    ]))
+    g = glob[0] if glob else {}
+
+    return {
+        "usuarios": total,
+        "onboarding_completos": completos,
+        "puntos_totales": g.get("puntos_totales", 0) or 0,
+        "racha_maxima": g.get("racha_maxima", 0) or 0,
+        "especialidades": [
+            {
+                "especialidad": d["_id"],
+                "usuarios": d["usuarios"],
+                "puntos_prom": round(d.get("puntos_prom") or 0),
+                "score_prom": score_map.get(d["_id"], 0),
+            }
+            for d in dist
+        ],
+    }
 
 
 def save_ranking(especialidad: str, data: dict) -> None:
@@ -1303,6 +892,132 @@ target-version = "py311"
 # E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]  # el largo de línea lo maneja el formatter
+````
+
+## File: scraper/test_logic.py
+````python
+"""Tests de la lógica pura del scraper (sin red ni base de datos).
+
+Correr con:  cd scraper && python -m pytest   (o: python -m pytest scraper)
+"""
+from bs4 import BeautifulSoup
+
+from extractor import extract_skills, rank_skills
+from scraper import (
+    especialidad_to_occ_queries,
+    extract_jsonld_jobs,
+    scrape_occ,
+    SEED_DATA,
+)
+from becas import filtrar_becas, dias_restantes
+
+
+# --- extractor ---------------------------------------------------------------
+
+def test_extract_skills_encuentra_por_palabra():
+    skills = extract_skills("Buscamos Python, SQL y Docker. React deseable.")
+    assert "Python" in skills
+    assert "SQL" in skills
+    assert "Docker" in skills
+
+
+def test_extract_skills_sin_falsos_positivos():
+    # 'java' no debe matchear dentro de 'javascript'
+    skills = extract_skills("Experiencia en JavaScript")
+    assert "JavaScript" in skills
+    assert "Java" not in skills
+
+
+def test_rank_skills_ordena_por_frecuencia():
+    listas = [["Python", "SQL"], ["Python"], ["Python", "Docker"]]
+    ranking = rank_skills(listas, top_n=5)
+    assert ranking[0]["skill"] == "Python"
+    assert ranking[0]["count"] == 3
+    assert ranking[0]["pct"] == 100
+
+
+# --- mapeo de especialidades -------------------------------------------------
+
+def test_especialidad_to_occ_queries_devuelve_lista():
+    qs = especialidad_to_occ_queries("datos-ia")
+    assert isinstance(qs, list)
+    assert "data-scientist" in qs
+    assert len(qs) >= 2
+
+
+def test_especialidad_desconocida_cae_a_default():
+    assert especialidad_to_occ_queries("nope") == ["desarrollador-web"]
+
+
+def test_seed_data_tiene_las_cinco_especialidades():
+    for esp in ["desarrollo-web", "datos-ia", "ciberseguridad", "devops-cloud", "redes"]:
+        assert esp in SEED_DATA
+        assert len(SEED_DATA[esp]) >= 5
+
+
+# --- JSON-LD -----------------------------------------------------------------
+
+def test_extract_jsonld_jobs_objeto_lista_y_graph():
+    html = """
+    <script type="application/ld+json">{"@type":"JobPosting","title":"Dev","description":"Python Django"}</script>
+    <script type="application/ld+json">[{"@type":"JobPosting","title":"Data","description":"SQL"}]</script>
+    <script type="application/ld+json">{"@graph":[{"@type":"WebSite"},{"@type":"JobPosting","title":"Ops","description":"Docker"}]}</script>
+    <script type="application/ld+json">no es json</script>
+    """
+    jobs = extract_jsonld_jobs(BeautifulSoup(html, "html.parser"))
+    assert len(jobs) == 3
+    assert any("Django" in j for j in jobs)
+
+
+def test_extract_jsonld_ignora_no_jobposting():
+    html = '<script type="application/ld+json">{"@type":"Organization","name":"X"}</script>'
+    assert extract_jsonld_jobs(BeautifulSoup(html, "html.parser")) == []
+
+
+# --- scrape_occ: combinación de múltiples queries ---------------------------
+
+def test_scrape_occ_combina_queries(monkeypatch):
+    llamadas = []
+
+    def fake(session, query, max_pages):
+        llamadas.append(query)
+        return [["Python", "SQL"]], 5, False
+
+    monkeypatch.setattr("scraper._scrape_query", fake)
+    r = scrape_occ("datos-ia")
+    assert llamadas == ["data-scientist", "analista-de-datos", "data-engineer"]
+    assert r["total_jobs"] == 15  # 3 queries x 5
+    assert r["source"] == "live"
+
+
+def test_scrape_occ_bloqueo_corta_y_cae_a_seed(monkeypatch):
+    llamadas = []
+
+    def fake_block(session, query, max_pages):
+        llamadas.append(query)
+        return [], 0, True
+
+    monkeypatch.setattr("scraper._scrape_query", fake_block)
+    r = scrape_occ("ciberseguridad")
+    assert len(llamadas) == 1  # cortó al primer bloqueo
+    assert r["source"] == "seed"
+
+
+# --- becas -------------------------------------------------------------------
+
+def test_dias_restantes_no_negativo():
+    assert dias_restantes("2000-01-01") == 0  # fecha pasada -> 0
+    assert dias_restantes("basura") == 999
+
+
+def test_filtrar_becas_prioriza_especialidad():
+    becas = filtrar_becas("datos-ia", "ing en sistemas", 5)
+    assert len(becas) > 0
+    # la primera debe ser específica de datos-ia o genérica, nunca irrelevante
+    primera = becas[0]
+    assert "datos-ia" in primera["especialidades"] or "*" in primera["especialidades"]
+    # todas traen dias_restantes calculado
+    assert all("dias_restantes" in b for b in becas)
 ````
 
 ## File: src/bot/especialidades.js
@@ -2016,6 +1731,325 @@ export const logger = pino({
 });
 ````
 
+## File: tests/cv_matcher.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import {
+  matchSkills,
+  recordScore,
+  proyectarEscenarios,
+} from '../src/bot/cv_matcher.js';
+
+const market = [
+  { skill: 'Python' },
+  { skill: 'SQL' },
+  { skill: 'Pandas' },
+  { skill: 'Machine Learning' },
+  { skill: 'Power BI' },
+  { skill: 'NumPy' },
+  { skill: 'Scikit-learn' },
+  { skill: 'TensorFlow' },
+  { skill: 'Tableau' },
+  { skill: 'inglés' },
+];
+
+describe('matchSkills', () => {
+  it('calcula score y separa have/missing', () => {
+    const { score, have, missing } = matchSkills(['Python', 'SQL'], market);
+    expect(score).toBe(20);
+    expect(have).toEqual(['Python', 'SQL']);
+    expect(missing).toContain('Pandas');
+    expect(have.length + missing.length).toBe(market.length);
+  });
+
+  it('normaliza aliases (js -> JavaScript, py -> Python)', () => {
+    const m = [{ skill: 'JavaScript' }, { skill: 'Python' }];
+    const { score } = matchSkills(['js', 'py'], m);
+    expect(score).toBe(100);
+  });
+
+  it('da 0 cuando no hay coincidencias', () => {
+    expect(matchSkills(['Cobol'], market).score).toBe(0);
+  });
+});
+
+describe('recordScore (dedup por mes y especialidad)', () => {
+  it('agrega una entrada nueva', () => {
+    const p = { cvScores: [] };
+    recordScore(p, 40, 'datos-ia');
+    expect(p.cvScores).toHaveLength(1);
+    expect(p.cvScores[0]).toMatchObject({ score: 40, especialidad: 'datos-ia' });
+  });
+
+  it('actualiza la entrada del mismo mes+especialidad en vez de duplicar', () => {
+    const p = { cvScores: [] };
+    recordScore(p, 40, 'datos-ia');
+    recordScore(p, 55, 'datos-ia');
+    expect(p.cvScores).toHaveLength(1);
+    expect(p.cvScores[0].score).toBe(55);
+  });
+
+  it('separa por especialidad distinta el mismo mes', () => {
+    const p = { cvScores: [] };
+    recordScore(p, 40, 'datos-ia');
+    recordScore(p, 30, 'ciberseguridad');
+    expect(p.cvScores).toHaveLength(2);
+  });
+
+  it('mantiene máximo 12 entradas al crecer (quita la más vieja)', () => {
+    const p = { cvScores: [] };
+    // 13 entradas distintas (especialidad distinta = no se deduplican)
+    for (let i = 0; i < 13; i++) recordScore(p, i, `esp-${i}`);
+    expect(p.cvScores).toHaveLength(12);
+    expect(p.cvScores.some((s) => s.especialidad === 'esp-0')).toBe(false); // la vieja salió
+  });
+});
+
+describe('proyectarEscenarios (forecasted self)', () => {
+  it('proyecta el score sumando las skills más demandadas', () => {
+    const proy = proyectarEscenarios(['Python', 'SQL'], market, 3);
+    expect(proy.actual).toBe(20);
+    expect(proy.escenarios).toHaveLength(3);
+    expect(proy.escenarios[0]).toMatchObject({ skill: 'Pandas', score: 30, delta: 10 });
+    expect(proy.escenarios.at(-1).score).toBe(50);
+  });
+
+  it('marca sinFaltantes cuando ya tiene todo', () => {
+    const todo = market.map((m) => m.skill);
+    const proy = proyectarEscenarios(todo, market, 3);
+    expect(proy.sinFaltantes).toBe(true);
+    expect(proy.escenarios).toHaveLength(0);
+  });
+
+  it('respeta el límite "hasta" y no excede las faltantes', () => {
+    const proy = proyectarEscenarios(market.slice(0, 9).map((m) => m.skill), market, 3);
+    expect(proy.escenarios).toHaveLength(1); // solo falta 1
+  });
+});
+````
+
+## File: tests/especialidades.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import {
+  ESPECIALIDADES,
+  OBJETIVOS,
+  parseSeleccion,
+  renderMenu,
+  labelDe,
+} from '../src/bot/especialidades.js';
+
+describe('parseSeleccion', () => {
+  it('interpreta por número (1-based)', () => {
+    expect(parseSeleccion('2', ESPECIALIDADES)).toBe(ESPECIALIDADES[1].key);
+  });
+
+  it('interpreta por texto/keyword', () => {
+    expect(parseSeleccion('datos', ESPECIALIDADES)).toBe('datos-ia');
+  });
+
+  it('devuelve null para entrada inválida', () => {
+    expect(parseSeleccion('99', ESPECIALIDADES)).toBeNull();
+    expect(parseSeleccion('xyz', ESPECIALIDADES)).toBeNull();
+  });
+
+  it('funciona con otra lista (objetivos)', () => {
+    expect(parseSeleccion('1', OBJETIVOS)).toBe(OBJETIVOS[0].key);
+  });
+});
+
+describe('renderMenu', () => {
+  it('numera las opciones desde 1', () => {
+    const menu = renderMenu(OBJETIVOS);
+    expect(menu).toContain('1.');
+    expect(menu.split('\n')).toHaveLength(OBJETIVOS.length);
+  });
+});
+
+describe('labelDe', () => {
+  it('devuelve la etiqueta legible de una key', () => {
+    expect(labelDe('datos-ia', ESPECIALIDADES)).toContain('Datos');
+  });
+
+  it('devuelve la key si no la encuentra', () => {
+    expect(labelDe('inexistente', ESPECIALIDADES)).toBe('inexistente');
+  });
+});
+````
+
+## File: tests/gamificacion.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import {
+  nivel,
+  otorgarPuntos,
+  actualizarRacha,
+  formatPuntos,
+} from '../src/bot/gamificacion.js';
+
+describe('nivel', () => {
+  it('es 1 con 0-99 puntos y sube cada 100', () => {
+    expect(nivel(0)).toBe(1);
+    expect(nivel(99)).toBe(1);
+    expect(nivel(100)).toBe(2);
+    expect(nivel(250)).toBe(3);
+  });
+
+  it('tolera undefined', () => {
+    expect(nivel(undefined)).toBe(1);
+  });
+});
+
+describe('otorgarPuntos', () => {
+  it('suma puntos y detecta subida de nivel', () => {
+    const p = { puntos: 80 };
+    const r = otorgarPuntos(p, 50);
+    expect(p.puntos).toBe(130);
+    expect(r.total).toBe(130);
+    expect(r.subioNivel).toBe(true);
+    expect(r.nivel).toBe(2);
+  });
+
+  it('no marca subida si no cruza el umbral', () => {
+    const p = { puntos: 10 };
+    const r = otorgarPuntos(p, 30);
+    expect(r.subioNivel).toBe(false);
+  });
+
+  it('arranca desde 0 si puntos es undefined', () => {
+    const p = {};
+    otorgarPuntos(p, 10);
+    expect(p.puntos).toBe(10);
+  });
+});
+
+describe('actualizarRacha', () => {
+  it('incrementa con éxito y guarda fecha', () => {
+    const p = { racha: 2 };
+    expect(actualizarRacha(p, true)).toBe(3);
+    expect(p.ultimaActividad).toBeInstanceOf(Date);
+  });
+
+  it('reinicia a 0 al fallar', () => {
+    const p = { racha: 5 };
+    expect(actualizarRacha(p, false)).toBe(0);
+  });
+});
+
+describe('formatPuntos', () => {
+  it('incluye puntos, nivel y racha', () => {
+    const msg = formatPuntos({ puntos: 130, racha: 3 });
+    expect(msg).toContain('130');
+    expect(msg).toContain('Nivel *2*');
+    expect(msg).toContain('3');
+  });
+});
+````
+
+## File: tests/onboarding.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import { steps } from '../src/bot/onboarding.js';
+import { STATES } from '../src/bot/states.js';
+
+describe('FSM onboarding — validaciones y transiciones', () => {
+  it('ASK_NOMBRE rechaza nombres muy cortos', () => {
+    const r = steps[STATES.ASK_NOMBRE].handle('a', {});
+    expect(r.ok).toBe(false);
+  });
+
+  it('ASK_NOMBRE acepta y avanza a CARRERA', () => {
+    const p = {};
+    const r = steps[STATES.ASK_NOMBRE].handle('Cristian', p);
+    expect(r).toMatchObject({ ok: true, next: STATES.ASK_CARRERA });
+    expect(p.nombre).toBe('Cristian');
+  });
+
+  it('ASK_SEMESTRE solo acepta 1-14', () => {
+    expect(steps[STATES.ASK_SEMESTRE].handle('0', {}).ok).toBe(false);
+    expect(steps[STATES.ASK_SEMESTRE].handle('15', {}).ok).toBe(false);
+    expect(steps[STATES.ASK_SEMESTRE].handle('6', {}).ok).toBe(true);
+  });
+
+  it('ASK_PROMEDIO acepta coma decimal y rango 0-10', () => {
+    const p = {};
+    expect(steps[STATES.ASK_PROMEDIO].handle('8,5', p).ok).toBe(true);
+    expect(p.promedio).toBe(8.5);
+    expect(steps[STATES.ASK_PROMEDIO].handle('11', {}).ok).toBe(false);
+  });
+
+  it('ASK_ESPECIALIDAD: número selecciona, "aún no lo sé" cae al default', () => {
+    const p = {};
+    steps[STATES.ASK_ESPECIALIDAD].handle('2', p);
+    expect(p.especialidad).toBeTruthy();
+    const p2 = {};
+    steps[STATES.ASK_ESPECIALIDAD].handle('6', p2); // opción extra
+    expect(p2.especialidad).toBe('desarrollo-web');
+  });
+
+  it('ASK_HABILIDADES parte por comas y filtra vacíos', () => {
+    const p = {};
+    const r = steps[STATES.ASK_HABILIDADES].handle('Python, , SQL ,Git', p);
+    expect(r.ok).toBe(true);
+    expect(p.habilidades).toEqual(['Python', 'SQL', 'Git']);
+    expect(r.next).toBe(STATES.ASK_NIVEL);
+  });
+
+  it('ASK_HORARIO parsea día + rango y vuelve a tolerar acentos', () => {
+    const p = {};
+    const r = steps[STATES.ASK_HORARIO].handle('lunes 19:00-21:00, sábado 09:00-13:00', p);
+    expect(r.ok).toBe(true);
+    expect(p.horario).toMatchObject({ lunes: '19:00-21:00', sabado: '09:00-13:00' });
+    expect(r.next).toBe(STATES.DONE);
+  });
+
+  it('ASK_HORARIO rechaza texto sin horario válido', () => {
+    expect(steps[STATES.ASK_HORARIO].handle('cuando pueda', {}).ok).toBe(false);
+  });
+
+  it('EDIT_HABILIDADES vuelve a DONE (no continúa el onboarding)', () => {
+    const r = steps[STATES.EDIT_HABILIDADES].handle('React, Docker', {});
+    expect(r.next).toBe(STATES.DONE);
+  });
+});
+````
+
+## File: tests/progreso.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import { generarGraficaProgreso } from '../src/bot/progreso.js';
+
+describe('generarGraficaProgreso', () => {
+  it('muestra mensaje cuando no hay historial', () => {
+    expect(generarGraficaProgreso([], 'datos-ia')).toContain('Aún no tienes historial');
+  });
+
+  it('filtra por la especialidad actual', () => {
+    const scores = [
+      { score: 50, fecha: new Date('2026-05-01'), especialidad: 'datos-ia' },
+      { score: 30, fecha: new Date('2026-05-01'), especialidad: 'ciberseguridad' },
+    ];
+    const g = generarGraficaProgreso(scores, 'datos-ia');
+    expect(g).toContain('50%');
+    expect(g).not.toContain('30%');
+  });
+
+  it('incluye entradas viejas sin especialidad (compat hacia atrás)', () => {
+    const scores = [{ score: 42, fecha: new Date('2026-04-01') }];
+    expect(generarGraficaProgreso(scores, 'datos-ia')).toContain('42%');
+  });
+
+  it('calcula la tendencia entre primera y última medición', () => {
+    const scores = [
+      { score: 20, fecha: new Date('2026-03-01'), especialidad: 'x' },
+      { score: 50, fecha: new Date('2026-05-01'), especialidad: 'x' },
+    ];
+    const g = generarGraficaProgreso(scores, 'x');
+    expect(g).toContain('+30%');
+  });
+});
+````
+
 ## File: .env.example
 ````
 # --- Telegram ---
@@ -2043,140 +2077,25 @@ GROQ_API_KEY=gsk_tu-key-aqui
 GROQ_MODEL=llama-3.3-70b-versatile
 ````
 
-## File: docs/contexto/convenciones.md
-````markdown
-# Convenciones
-
-## Lenguaje y módulos
-
-- **Node.js**: ESM puro (`"type": "module"` en package.json). Usar `import/export`, nunca `require()`.
-- **Python**: módulos sueltos importados directamente (`from scraper import scrape_occ`), sin paquete instalable.
-- **Idioma del código**: español para nombres de dominio (`perfil`, `carrera`, `horario`), inglés para infraestructura (`connectDB`, `matchSkills`, `save_ranking`).
-
-## Naming
-
-| Elemento | Convención | Ejemplo |
-|----------|-----------|---------|
-| Archivos Node | camelCase | `cv_matcher.js`, `onboarding.js` |
-| Archivos Python | snake_case | `scraper.py`, `becas.py` |
-| Funciones Node | camelCase | `matchSkills()`, `generatePlan()` |
-| Funciones Python | snake_case | `filtrar_becas()`, `rank_skills()` |
-| Constantes | UPPER_SNAKE | `STATES`, `SKILLS_CATALOG`, `SEED_DATA` |
-| Colecciones Mongo | plural lowercase | `profiles`, `skill_rankings` |
-| Variables de entorno | UPPER_SNAKE | `BOT_TOKEN`, `MONGODB_URI` |
-
-## Estilo Node.js
-
-- Linter/formatter: **ESLint** (flat config, `eslint.config.js`) + **Prettier** (`.prettierrc.json`). Corre `npm run lint` y `npm run format`. Prettier manda en el estilo (comillas simples, punto y coma, ancho 100).
-- Arrow functions para callbacks cortos; `async function` con nombre para handlers de comandos
-- Mensajes de Telegram con template literals; `parse_mode: 'Markdown'` para negritas/cursivas
-- Límite de 4096 caracteres por mensaje Telegram: cortar si el plan supera la mitad del límite
-
-## Estilo Python
-
-- Type hints en firmas de funciones (`def filtrar_becas(carrera: str, limit: int) -> list[dict]`)
-- Docstring de una línea cuando el propósito no es obvio; sin docstrings extensos
-- `load_dotenv()` al inicio de cada módulo raíz que acceda a env vars
-
-## Patrones que usamos
-
-- **FSM en MongoDB**: el estado de conversación vive en `profile.conversationState`, no en memoria. Permite reinicios sin perder contexto.
-- **Fail-fast en config**: `config.js` llama a `process.exit(1)` si falta una env var requerida.
-- **Seed data como fallback**: cuando el scraper es bloqueado, se devuelven datos reales precargados en vez de error.
-- **Alias normalization**: `cv_matcher.js` normaliza abreviaciones antes de comparar (`js → JavaScript`).
-- **Fix DNS global**: tanto Node (`dns.setServers`) como Python (`dns.resolver.default_resolver`) fuerzan Google DNS al arranque.
-
-## Patrones prohibidos
-
-- No usar `require()` en Node (rompe ESM).
-- No guardar estado de conversación en variables globales (se perdería al reiniciar).
-- No hacer `import *` en Python (dificulta rastrear dependencias).
-- No usar emojis en `print()` de Python sin `chcp 65001` o `PYTHONIOENCODING=utf-8` (rompe en Windows cp1252).
-- No llamar a `bot.launch()` desde más de un proceso (conflicto de polling).
-
-## Logging
-
-- **Node**: usar `logger` de `src/logger.js` (pino), nunca `console.log`/`console.error`.
-  Formato `logger.info({ campo: valor }, 'mensaje')` — el objeto va primero. Pretty en
-  desarrollo, JSON en producción. Excepción: `config.js` usa `console.error` a propósito
-  (fallo de arranque antes de que exista el logger).
-- **Python**: `print()` con prefijo `[SCRAPE]`, `[SCRAPER]`, etc. (sin emojis nuevos).
-
-## Rate limiting
-
-- Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
-  `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
-
-## Comunicación entre servicios
-
-- Todas las llamadas Node→Python pasan por `src/bot/scraper_client.js` (URL base +
-  header `X-API-Key`). No hagas `fetch` directo al scraper desde los comandos.
-- El scraper valida `X-API-Key` contra `API_SECRET_KEY` (si está configurada).
-  Vacía = auth off (solo local). `/health` queda siempre abierto.
-
-## Validación de salida de LLM
-
-- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
-  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
-
-## Tests
-
-- **Node**: Vitest. Corre `npm test`. Tests en `tests/*.test.js`, cubren la lógica
-  pura (matchSkills, recordScore, proyectarEscenarios, gamificación, FSM del
-  onboarding, progreso, especialidades).
-- **Python**: pytest. Corre `cd scraper && python -m pytest`. Test en
-  `scraper/test_logic.py` (extractor, JSON-LD, multi-query, becas) — sin red ni DB,
-  con `monkeypatch` para `_scrape_query`.
-- Regla: la lógica nueva pura va con su test. No se prueban comandos que tocan
-  Telegram/Mongo/Groq end-to-end (se validan a mano).
-- Lint: `npm run lint` y `ruff check scraper`.
-
-## Commits
-
-[PENDIENTE: no hay git en el directorio del proyecto. Si se inicializa, usar Conventional Commits: `feat:`, `fix:`, `chore:`.]
+## File: .gitignore
 ````
+node_modules/
+.env
+*.log
+.DS_Store
 
-## File: package.json
-````json
-{
-  "name": "asistente-carrera-bot",
-  "version": "0.1.0",
-  "description": "Bot de Telegram que hace onboarding inteligente, diagnostico de brechas y plan de estudios personalizado para estudiantes.",
-  "type": "module",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first src/index.js\" \"py -X utf8 scraper/app.py\"",
-    "bot": "node --dns-result-order=ipv4first src/index.js",
-    "scraper": "py scraper/app.py",
-    "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\"",
-    "lint": "eslint src",
-    "format": "prettier --write \"**/*.{js,json,md}\"",
-    "format:check": "prettier --check \"**/*.{js,json,md}\"",
-    "test": "vitest run"
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "@google/genai": "^2.10.0",
-    "dotenv": "^16.4.5",
-    "mongoose": "^8.5.1",
-    "node-cron": "^4.5.0",
-    "pdfkit": "^0.19.1",
-    "pino": "^10.3.1",
-    "pino-pretty": "^13.1.3",
-    "telegraf": "^4.16.3",
-    "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "concurrently": "^10.0.3",
-    "eslint": "^10.6.0",
-    "globals": "^17.7.0",
-    "prettier": "^3.9.4",
-    "vitest": "^4.1.9"
-  }
-}
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Cobertura de tests
+coverage/
+
+# Artefactos generados
+*.pdf
 ````
 
 ## File: src/bot/cv_generator.js
@@ -3085,6 +3004,142 @@ const profileSchema = new mongoose.Schema(
 export const Profile = mongoose.model('Profile', profileSchema);
 ````
 
+## File: docs/contexto/convenciones.md
+````markdown
+# Convenciones
+
+## Lenguaje y módulos
+
+- **Node.js**: ESM puro (`"type": "module"` en package.json). Usar `import/export`, nunca `require()`.
+- **Python**: módulos sueltos importados directamente (`from scraper import scrape_occ`), sin paquete instalable.
+- **Idioma del código**: español para nombres de dominio (`perfil`, `carrera`, `horario`), inglés para infraestructura (`connectDB`, `matchSkills`, `save_ranking`).
+
+## Naming
+
+| Elemento | Convención | Ejemplo |
+|----------|-----------|---------|
+| Archivos Node | camelCase | `cv_matcher.js`, `onboarding.js` |
+| Archivos Python | snake_case | `scraper.py`, `becas.py` |
+| Funciones Node | camelCase | `matchSkills()`, `generatePlan()` |
+| Funciones Python | snake_case | `filtrar_becas()`, `rank_skills()` |
+| Constantes | UPPER_SNAKE | `STATES`, `SKILLS_CATALOG`, `SEED_DATA` |
+| Colecciones Mongo | plural lowercase | `profiles`, `skill_rankings` |
+| Variables de entorno | UPPER_SNAKE | `BOT_TOKEN`, `MONGODB_URI` |
+
+## Estilo Node.js
+
+- Linter/formatter: **ESLint** (flat config, `eslint.config.js`) + **Prettier** (`.prettierrc.json`). Corre `npm run lint` y `npm run format`. Prettier manda en el estilo (comillas simples, punto y coma, ancho 100).
+- Arrow functions para callbacks cortos; `async function` con nombre para handlers de comandos
+- Mensajes de Telegram con template literals; `parse_mode: 'Markdown'` para negritas/cursivas
+- Límite de 4096 caracteres por mensaje Telegram: cortar si el plan supera la mitad del límite
+
+## Estilo Python
+
+- Type hints en firmas de funciones (`def filtrar_becas(carrera: str, limit: int) -> list[dict]`)
+- Docstring de una línea cuando el propósito no es obvio; sin docstrings extensos
+- `load_dotenv()` al inicio de cada módulo raíz que acceda a env vars
+
+## Patrones que usamos
+
+- **FSM en MongoDB**: el estado de conversación vive en `profile.conversationState`, no en memoria. Permite reinicios sin perder contexto.
+- **Fail-fast en config**: `config.js` llama a `process.exit(1)` si falta una env var requerida.
+- **Seed data como fallback**: cuando el scraper es bloqueado, se devuelven datos reales precargados en vez de error.
+- **Alias normalization**: `cv_matcher.js` normaliza abreviaciones antes de comparar (`js → JavaScript`).
+- **Fix DNS global**: tanto Node (`dns.setServers`) como Python (`dns.resolver.default_resolver`) fuerzan Google DNS al arranque.
+
+## Patrones prohibidos
+
+- No usar `require()` en Node (rompe ESM).
+- No guardar estado de conversación en variables globales (se perdería al reiniciar).
+- No hacer `import *` en Python (dificulta rastrear dependencias).
+- No usar emojis en `print()` de Python sin `chcp 65001` o `PYTHONIOENCODING=utf-8` (rompe en Windows cp1252).
+- No llamar a `bot.launch()` desde más de un proceso (conflicto de polling).
+
+## Logging
+
+- **Node**: usar `logger` de `src/logger.js` (pino), nunca `console.log`/`console.error`.
+  Formato `logger.info({ campo: valor }, 'mensaje')` — el objeto va primero. Pretty en
+  desarrollo, JSON en producción. Excepción: `config.js` usa `console.error` a propósito
+  (fallo de arranque antes de que exista el logger).
+- **Python**: `print()` con prefijo `[SCRAPE]`, `[SCRAPER]`, etc. (sin emojis nuevos).
+
+## Rate limiting
+
+- Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
+  `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
+
+## Comunicación entre servicios
+
+- Todas las llamadas Node→Python pasan por `src/bot/scraper_client.js` (URL base +
+  header `X-API-Key`). No hagas `fetch` directo al scraper desde los comandos.
+- El scraper valida `X-API-Key` contra `API_SECRET_KEY` (si está configurada).
+  Vacía = auth off (solo local). `/health` queda siempre abierto.
+
+## Validación de salida de LLM
+
+- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
+  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
+
+## Tests
+
+- **Node**: Vitest. Corre `npm test`. Tests en `tests/*.test.js`, cubren la lógica
+  pura (matchSkills, recordScore, proyectarEscenarios, gamificación, FSM del
+  onboarding, progreso, especialidades).
+- **Python**: pytest. Corre `cd scraper && python -m pytest`. Test en
+  `scraper/test_logic.py` (extractor, JSON-LD, multi-query, becas) — sin red ni DB,
+  con `monkeypatch` para `_scrape_query`.
+- Regla: la lógica nueva pura va con su test. No se prueban comandos que tocan
+  Telegram/Mongo/Groq end-to-end (se validan a mano).
+- Lint: `npm run lint` y `ruff check scraper`.
+
+## Commits
+
+[PENDIENTE: no hay git en el directorio del proyecto. Si se inicializa, usar Conventional Commits: `feat:`, `fix:`, `chore:`.]
+````
+
+## File: package.json
+````json
+{
+  "name": "asistente-carrera-bot",
+  "version": "0.1.0",
+  "description": "Bot de Telegram que hace onboarding inteligente, diagnostico de brechas y plan de estudios personalizado para estudiantes.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first src/index.js\" \"py -X utf8 scraper/app.py\"",
+    "bot": "node --dns-result-order=ipv4first src/index.js",
+    "scraper": "py scraper/app.py",
+    "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\"",
+    "lint": "eslint src",
+    "format": "prettier --write \"**/*.{js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{js,json,md}\"",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "^2.10.0",
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.5.1",
+    "node-cron": "^4.5.0",
+    "pdfkit": "^0.19.1",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
+    "telegraf": "^4.16.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "concurrently": "^10.0.3",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.4",
+    "vitest": "^4.1.9"
+  }
+}
+````
+
 ## File: scraper/app.py
 ````python
 import atexit
@@ -3095,7 +3150,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 from scraper import scrape_occ, SEED_DATA, DEFAULT_SEED
-from models import save_ranking, get_ranking, list_especialidades
+from models import save_ranking, get_ranking, list_especialidades, metricas
 from becas import filtrar_becas
 
 load_dotenv()
@@ -3115,7 +3170,9 @@ def _check_api_key():
     """
     if not API_SECRET_KEY or request.path == "/health":
         return None
-    if request.headers.get("X-API-Key", "") != API_SECRET_KEY:
+    # Acepta la key por header (bot) o por query param ?key= (dashboard en navegador)
+    provided = request.headers.get("X-API-Key", "") or request.args.get("key", "")
+    if provided != API_SECRET_KEY:
         return jsonify({"error": "No autorizado"}), 401
     return None
 
@@ -3203,6 +3260,81 @@ def scrape():
 @app.get("/especialidades")
 def especialidades():
     return jsonify({"especialidades": list_especialidades()})
+
+
+# --- Dashboard de métricas --------------------------------------------------
+
+ESP_LABEL = {
+    "desarrollo-web": "🌐 Desarrollo Web",
+    "datos-ia": "📊 Datos e IA",
+    "ciberseguridad": "🔐 Ciberseguridad",
+    "devops-cloud": "☁️ DevOps y Cloud",
+    "redes": "🖧 Redes",
+}
+
+
+@app.get("/metrics")
+def metrics():
+    """Métricas de uso en JSON (para scripts/monitoreo)."""
+    return jsonify(metricas())
+
+
+@app.get("/dashboard")
+def dashboard():
+    """Dashboard HTML simple (server-rendered, sin JS)."""
+    m = metricas()
+    pct = round(m["onboarding_completos"] / m["usuarios"] * 100) if m["usuarios"] else 0
+    max_users = max((e["usuarios"] for e in m["especialidades"]), default=1) or 1
+
+    filas = ""
+    for e in m["especialidades"]:
+        label = ESP_LABEL.get(e["especialidad"], e["especialidad"])
+        ancho = round(e["usuarios"] / max_users * 100)
+        filas += f"""
+        <tr>
+          <td>{label}</td>
+          <td><div class="bar"><span style="width:{ancho}%"></span></div>{e['usuarios']}</td>
+          <td>{e['score_prom']}%</td>
+          <td>{e['puntos_prom']}</td>
+        </tr>"""
+
+    if not filas:
+        filas = '<tr><td colspan="4" class="empty">Aún no hay perfiles con especialidad.</td></tr>'
+
+    html = f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asistente de Carrera — Métricas</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background:#0f1115; color:#e6e6e6; margin:0; padding:32px; }}
+  h1 {{ font-size:1.4rem; margin:0 0 4px; }}
+  .sub {{ color:#8a8f98; margin-bottom:24px; }}
+  .cards {{ display:flex; flex-wrap:wrap; gap:16px; margin-bottom:28px; }}
+  .card {{ background:#1a1d24; border:1px solid #272b34; border-radius:12px; padding:18px 22px; min-width:140px; }}
+  .card .n {{ font-size:2rem; font-weight:700; }}
+  .card .l {{ color:#8a8f98; font-size:.85rem; }}
+  table {{ width:100%; border-collapse:collapse; background:#1a1d24; border-radius:12px; overflow:hidden; }}
+  th,td {{ text-align:left; padding:12px 16px; border-bottom:1px solid #272b34; }}
+  th {{ color:#8a8f98; font-weight:600; font-size:.85rem; }}
+  .bar {{ display:inline-block; width:120px; height:8px; background:#272b34; border-radius:4px; margin-right:8px; vertical-align:middle; }}
+  .bar span {{ display:block; height:100%; background:#5b8def; border-radius:4px; }}
+  .empty {{ color:#8a8f98; text-align:center; }}
+</style></head>
+<body>
+  <h1>📈 Asistente de Carrera — Métricas</h1>
+  <div class="sub">Datos en vivo desde MongoDB</div>
+  <div class="cards">
+    <div class="card"><div class="n">{m['usuarios']}</div><div class="l">Usuarios</div></div>
+    <div class="card"><div class="n">{pct}%</div><div class="l">Onboarding completo</div></div>
+    <div class="card"><div class="n">{m['puntos_totales']}</div><div class="l">Puntos totales</div></div>
+    <div class="card"><div class="n">{m['racha_maxima']}</div><div class="l">Racha máxima</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Especialidad</th><th>Usuarios</th><th>Score prom.</th><th>Puntos prom.</th></tr></thead>
+    <tbody>{filas}</tbody>
+  </table>
+</body></html>"""
+    return html
 
 
 @app.get("/becas")
@@ -3610,6 +3742,8 @@ capturando una rebanada más realista del mercado que un solo slug.
 | `GET /skills` | `?especialidad=&limit=` — nunca 404: si no hay ranking, cae a SEED_DATA |
 | `GET /becas` | `?especialidad=&carrera=&limit=` |
 | `GET /especialidades` | (lista las que tienen ranking) |
+| `GET /metrics` | métricas de uso en JSON (agrega la colección `profiles`) |
+| `GET /dashboard` | dashboard HTML server-rendered; en navegador usar `?key=<API_SECRET_KEY>` |
 
 ## Qué NO existe
 
@@ -3618,7 +3752,7 @@ capturando una rebanada más realista del mercado que un solo slug.
 - Rate limiting en el bot o en la API Flask
 - Caché en memoria (Redis, etc.)
 - Google Calendar integration (mencionada en README, no implementada)
-- Panel de administración o dashboard
+- Panel de administración con autenticación de usuarios (sí hay un `/dashboard` de métricas protegido por API key)
 - Logs estructurados / observabilidad (solo console.log / print)
 - Multilenguaje (solo español)
 - Variables de entorno en producción cloud (Railway no configurado todavía)

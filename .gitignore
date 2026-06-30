@@ -8,6 +8,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+
+# Cobertura de tests
+coverage/
 
 # Artefactos generados
 *.pdf

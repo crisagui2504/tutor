@@ -11,7 +11,8 @@
     "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\"",
     "lint": "eslint src",
     "format": "prettier --write \"**/*.{js,json,md}\"",
-    "format:check": "prettier --check \"**/*.{js,json,md}\""
+    "format:check": "prettier --check \"**/*.{js,json,md}\"",
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=20"
@@ -32,6 +33,7 @@
     "concurrently": "^10.0.3",
     "eslint": "^10.6.0",
     "globals": "^17.7.0",
-    "prettier": "^3.9.4"
+    "prettier": "^3.9.4",
+    "vitest": "^4.1.9"
   }
 }

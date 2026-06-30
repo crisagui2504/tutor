@@ -110,7 +110,7 @@ capturando una rebanada más realista del mercado que un solo slug.
 
 ## Qué NO existe
 
-- Tests (unitarios, integración o e2e)
+- Tests de integración/e2e de los comandos (sí hay unitarios de lógica pura: Vitest + pytest)
 - Autenticación o autorización adicional (solo telegramId implícito)
 - Rate limiting en el bot o en la API Flask
 - Caché en memoria (Redis, etc.)

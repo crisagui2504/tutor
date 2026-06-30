@@ -74,7 +74,15 @@
 
 ## Tests
 
-[PENDIENTE: no hay tests automatizados. Si se añaden, usar Jest para Node y pytest para Python. Lint con `npm run lint` y `ruff check scraper`.]
+- **Node**: Vitest. Corre `npm test`. Tests en `tests/*.test.js`, cubren la lógica
+  pura (matchSkills, recordScore, proyectarEscenarios, gamificación, FSM del
+  onboarding, progreso, especialidades).
+- **Python**: pytest. Corre `cd scraper && python -m pytest`. Test en
+  `scraper/test_logic.py` (extractor, JSON-LD, multi-query, becas) — sin red ni DB,
+  con `monkeypatch` para `_scrape_query`.
+- Regla: la lógica nueva pura va con su test. No se prueban comandos que tocan
+  Telegram/Mongo/Groq end-to-end (se validan a mano).
+- Lint: `npm run lint` y `ruff check scraper`.
 
 ## Commits
 

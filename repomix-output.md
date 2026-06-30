@@ -56,6 +56,7 @@ scraper/models.py
 scraper/requirements.txt
 scraper/ruff.toml
 scraper/scraper.py
+scraper/test_logic.py
 src/bot/cv_generator.js
 src/bot/cv_matcher.js
 src/bot/especialidades.js
@@ -72,74 +73,458 @@ src/db.js
 src/index.js
 src/logger.js
 src/models/profile.js
+tests/cv_matcher.test.js
+tests/especialidades.test.js
+tests/gamificacion.test.js
+tests/onboarding.test.js
+tests/progreso.test.js
 ```
 
 # Files
 
-## File: src/bot/gamificacion.js
+## File: scraper/test_logic.py
+````python
+"""Tests de la lógica pura del scraper (sin red ni base de datos).
+
+Correr con:  cd scraper && python -m pytest   (o: python -m pytest scraper)
+"""
+from bs4 import BeautifulSoup
+
+from extractor import extract_skills, rank_skills
+from scraper import (
+    especialidad_to_occ_queries,
+    extract_jsonld_jobs,
+    scrape_occ,
+    SEED_DATA,
+)
+from becas import filtrar_becas, dias_restantes
+
+
+# --- extractor ---------------------------------------------------------------
+
+def test_extract_skills_encuentra_por_palabra():
+    skills = extract_skills("Buscamos Python, SQL y Docker. React deseable.")
+    assert "Python" in skills
+    assert "SQL" in skills
+    assert "Docker" in skills
+
+
+def test_extract_skills_sin_falsos_positivos():
+    # 'java' no debe matchear dentro de 'javascript'
+    skills = extract_skills("Experiencia en JavaScript")
+    assert "JavaScript" in skills
+    assert "Java" not in skills
+
+
+def test_rank_skills_ordena_por_frecuencia():
+    listas = [["Python", "SQL"], ["Python"], ["Python", "Docker"]]
+    ranking = rank_skills(listas, top_n=5)
+    assert ranking[0]["skill"] == "Python"
+    assert ranking[0]["count"] == 3
+    assert ranking[0]["pct"] == 100
+
+
+# --- mapeo de especialidades -------------------------------------------------
+
+def test_especialidad_to_occ_queries_devuelve_lista():
+    qs = especialidad_to_occ_queries("datos-ia")
+    assert isinstance(qs, list)
+    assert "data-scientist" in qs
+    assert len(qs) >= 2
+
+
+def test_especialidad_desconocida_cae_a_default():
+    assert especialidad_to_occ_queries("nope") == ["desarrollador-web"]
+
+
+def test_seed_data_tiene_las_cinco_especialidades():
+    for esp in ["desarrollo-web", "datos-ia", "ciberseguridad", "devops-cloud", "redes"]:
+        assert esp in SEED_DATA
+        assert len(SEED_DATA[esp]) >= 5
+
+
+# --- JSON-LD -----------------------------------------------------------------
+
+def test_extract_jsonld_jobs_objeto_lista_y_graph():
+    html = """
+    <script type="application/ld+json">{"@type":"JobPosting","title":"Dev","description":"Python Django"}</script>
+    <script type="application/ld+json">[{"@type":"JobPosting","title":"Data","description":"SQL"}]</script>
+    <script type="application/ld+json">{"@graph":[{"@type":"WebSite"},{"@type":"JobPosting","title":"Ops","description":"Docker"}]}</script>
+    <script type="application/ld+json">no es json</script>
+    """
+    jobs = extract_jsonld_jobs(BeautifulSoup(html, "html.parser"))
+    assert len(jobs) == 3
+    assert any("Django" in j for j in jobs)
+
+
+def test_extract_jsonld_ignora_no_jobposting():
+    html = '<script type="application/ld+json">{"@type":"Organization","name":"X"}</script>'
+    assert extract_jsonld_jobs(BeautifulSoup(html, "html.parser")) == []
+
+
+# --- scrape_occ: combinación de múltiples queries ---------------------------
+
+def test_scrape_occ_combina_queries(monkeypatch):
+    llamadas = []
+
+    def fake(session, query, max_pages):
+        llamadas.append(query)
+        return [["Python", "SQL"]], 5, False
+
+    monkeypatch.setattr("scraper._scrape_query", fake)
+    r = scrape_occ("datos-ia")
+    assert llamadas == ["data-scientist", "analista-de-datos", "data-engineer"]
+    assert r["total_jobs"] == 15  # 3 queries x 5
+    assert r["source"] == "live"
+
+
+def test_scrape_occ_bloqueo_corta_y_cae_a_seed(monkeypatch):
+    llamadas = []
+
+    def fake_block(session, query, max_pages):
+        llamadas.append(query)
+        return [], 0, True
+
+    monkeypatch.setattr("scraper._scrape_query", fake_block)
+    r = scrape_occ("ciberseguridad")
+    assert len(llamadas) == 1  # cortó al primer bloqueo
+    assert r["source"] == "seed"
+
+
+# --- becas -------------------------------------------------------------------
+
+def test_dias_restantes_no_negativo():
+    assert dias_restantes("2000-01-01") == 0  # fecha pasada -> 0
+    assert dias_restantes("basura") == 999
+
+
+def test_filtrar_becas_prioriza_especialidad():
+    becas = filtrar_becas("datos-ia", "ing en sistemas", 5)
+    assert len(becas) > 0
+    # la primera debe ser específica de datos-ia o genérica, nunca irrelevante
+    primera = becas[0]
+    assert "datos-ia" in primera["especialidades"] or "*" in primera["especialidades"]
+    # todas traen dias_restantes calculado
+    assert all("dias_restantes" in b for b in becas)
+````
+
+## File: tests/cv_matcher.test.js
 ````javascript
-/**
- * Sistema de puntos y racha. Cierra el loop de engagement: el /quiz y el check-in
- * semanal otorgan puntos; mantener actividad semana a semana sube la racha.
- *
- * - Puntos: acumulables, definen el nivel (cada 100 puntos = 1 nivel).
- * - Racha: semanas consecutivas completando el check-in (se reinicia al fallar).
- *
- * Todas las funciones MUTAN el profile en memoria; el caller hace save().
- */
-const PUNTOS_POR_NIVEL = 100;
+import { describe, it, expect } from 'vitest';
+import {
+  matchSkills,
+  recordScore,
+  proyectarEscenarios,
+} from '../src/bot/cv_matcher.js';
 
-export function nivel(puntos) {
-  return Math.floor((puntos || 0) / PUNTOS_POR_NIVEL) + 1;
-}
+const market = [
+  { skill: 'Python' },
+  { skill: 'SQL' },
+  { skill: 'Pandas' },
+  { skill: 'Machine Learning' },
+  { skill: 'Power BI' },
+  { skill: 'NumPy' },
+  { skill: 'Scikit-learn' },
+  { skill: 'TensorFlow' },
+  { skill: 'Tableau' },
+  { skill: 'inglés' },
+];
 
-function progresoNivel(puntos) {
-  return (puntos || 0) % PUNTOS_POR_NIVEL; // 0-99
-}
+describe('matchSkills', () => {
+  it('calcula score y separa have/missing', () => {
+    const { score, have, missing } = matchSkills(['Python', 'SQL'], market);
+    expect(score).toBe(20);
+    expect(have).toEqual(['Python', 'SQL']);
+    expect(missing).toContain('Pandas');
+    expect(have.length + missing.length).toBe(market.length);
+  });
 
-/**
- * Suma puntos al perfil. Devuelve el total y si subió de nivel.
- */
-export function otorgarPuntos(profile, cantidad) {
-  const nivelAntes = nivel(profile.puntos);
-  profile.puntos = (profile.puntos || 0) + cantidad;
-  const nivelDespues = nivel(profile.puntos);
-  return {
-    total: profile.puntos,
-    subioNivel: nivelDespues > nivelAntes,
-    nivel: nivelDespues,
-  };
-}
+  it('normaliza aliases (js -> JavaScript, py -> Python)', () => {
+    const m = [{ skill: 'JavaScript' }, { skill: 'Python' }];
+    const { score } = matchSkills(['js', 'py'], m);
+    expect(score).toBe(100);
+  });
 
-/**
- * Actualiza la racha semanal: +1 si hubo actividad, 0 si se rompió.
- */
-export function actualizarRacha(profile, exito) {
-  profile.racha = exito ? (profile.racha || 0) + 1 : 0;
-  profile.ultimaActividad = new Date();
-  return profile.racha;
-}
+  it('da 0 cuando no hay coincidencias', () => {
+    expect(matchSkills(['Cobol'], market).score).toBe(0);
+  });
+});
 
-/**
- * Mensaje de estado de gamificación para /puntos (Markdown).
- */
-export function formatPuntos(profile) {
-  const puntos = profile.puntos || 0;
-  const nv = nivel(puntos);
-  const prog = progresoNivel(puntos);
-  const llenos = Math.round(prog / 10);
-  const barra = '█'.repeat(llenos) + '░'.repeat(10 - llenos);
-  const racha = profile.racha || 0;
-  const fuego = racha > 0 ? '🔥'.repeat(Math.min(racha, 5)) : '🥶';
+describe('recordScore (dedup por mes y especialidad)', () => {
+  it('agrega una entrada nueva', () => {
+    const p = { cvScores: [] };
+    recordScore(p, 40, 'datos-ia');
+    expect(p.cvScores).toHaveLength(1);
+    expect(p.cvScores[0]).toMatchObject({ score: 40, especialidad: 'datos-ia' });
+  });
 
-  return (
-    '🏆 *Tu progreso*\n\n' +
-    `⭐ Puntos: *${puntos}*\n` +
-    `📊 Nivel *${nv}*   \`${barra}\`   ${prog}/100\n` +
-    `${fuego} Racha: *${racha}* semana(s)\n\n` +
-    'Gana puntos con /quiz y completando tu check-in semanal de los lunes.'
-  );
-}
+  it('actualiza la entrada del mismo mes+especialidad en vez de duplicar', () => {
+    const p = { cvScores: [] };
+    recordScore(p, 40, 'datos-ia');
+    recordScore(p, 55, 'datos-ia');
+    expect(p.cvScores).toHaveLength(1);
+    expect(p.cvScores[0].score).toBe(55);
+  });
+
+  it('separa por especialidad distinta el mismo mes', () => {
+    const p = { cvScores: [] };
+    recordScore(p, 40, 'datos-ia');
+    recordScore(p, 30, 'ciberseguridad');
+    expect(p.cvScores).toHaveLength(2);
+  });
+
+  it('mantiene máximo 12 entradas al crecer (quita la más vieja)', () => {
+    const p = { cvScores: [] };
+    // 13 entradas distintas (especialidad distinta = no se deduplican)
+    for (let i = 0; i < 13; i++) recordScore(p, i, `esp-${i}`);
+    expect(p.cvScores).toHaveLength(12);
+    expect(p.cvScores.some((s) => s.especialidad === 'esp-0')).toBe(false); // la vieja salió
+  });
+});
+
+describe('proyectarEscenarios (forecasted self)', () => {
+  it('proyecta el score sumando las skills más demandadas', () => {
+    const proy = proyectarEscenarios(['Python', 'SQL'], market, 3);
+    expect(proy.actual).toBe(20);
+    expect(proy.escenarios).toHaveLength(3);
+    expect(proy.escenarios[0]).toMatchObject({ skill: 'Pandas', score: 30, delta: 10 });
+    expect(proy.escenarios.at(-1).score).toBe(50);
+  });
+
+  it('marca sinFaltantes cuando ya tiene todo', () => {
+    const todo = market.map((m) => m.skill);
+    const proy = proyectarEscenarios(todo, market, 3);
+    expect(proy.sinFaltantes).toBe(true);
+    expect(proy.escenarios).toHaveLength(0);
+  });
+
+  it('respeta el límite "hasta" y no excede las faltantes', () => {
+    const proy = proyectarEscenarios(market.slice(0, 9).map((m) => m.skill), market, 3);
+    expect(proy.escenarios).toHaveLength(1); // solo falta 1
+  });
+});
+````
+
+## File: tests/especialidades.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import {
+  ESPECIALIDADES,
+  OBJETIVOS,
+  parseSeleccion,
+  renderMenu,
+  labelDe,
+} from '../src/bot/especialidades.js';
+
+describe('parseSeleccion', () => {
+  it('interpreta por número (1-based)', () => {
+    expect(parseSeleccion('2', ESPECIALIDADES)).toBe(ESPECIALIDADES[1].key);
+  });
+
+  it('interpreta por texto/keyword', () => {
+    expect(parseSeleccion('datos', ESPECIALIDADES)).toBe('datos-ia');
+  });
+
+  it('devuelve null para entrada inválida', () => {
+    expect(parseSeleccion('99', ESPECIALIDADES)).toBeNull();
+    expect(parseSeleccion('xyz', ESPECIALIDADES)).toBeNull();
+  });
+
+  it('funciona con otra lista (objetivos)', () => {
+    expect(parseSeleccion('1', OBJETIVOS)).toBe(OBJETIVOS[0].key);
+  });
+});
+
+describe('renderMenu', () => {
+  it('numera las opciones desde 1', () => {
+    const menu = renderMenu(OBJETIVOS);
+    expect(menu).toContain('1.');
+    expect(menu.split('\n')).toHaveLength(OBJETIVOS.length);
+  });
+});
+
+describe('labelDe', () => {
+  it('devuelve la etiqueta legible de una key', () => {
+    expect(labelDe('datos-ia', ESPECIALIDADES)).toContain('Datos');
+  });
+
+  it('devuelve la key si no la encuentra', () => {
+    expect(labelDe('inexistente', ESPECIALIDADES)).toBe('inexistente');
+  });
+});
+````
+
+## File: tests/gamificacion.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import {
+  nivel,
+  otorgarPuntos,
+  actualizarRacha,
+  formatPuntos,
+} from '../src/bot/gamificacion.js';
+
+describe('nivel', () => {
+  it('es 1 con 0-99 puntos y sube cada 100', () => {
+    expect(nivel(0)).toBe(1);
+    expect(nivel(99)).toBe(1);
+    expect(nivel(100)).toBe(2);
+    expect(nivel(250)).toBe(3);
+  });
+
+  it('tolera undefined', () => {
+    expect(nivel(undefined)).toBe(1);
+  });
+});
+
+describe('otorgarPuntos', () => {
+  it('suma puntos y detecta subida de nivel', () => {
+    const p = { puntos: 80 };
+    const r = otorgarPuntos(p, 50);
+    expect(p.puntos).toBe(130);
+    expect(r.total).toBe(130);
+    expect(r.subioNivel).toBe(true);
+    expect(r.nivel).toBe(2);
+  });
+
+  it('no marca subida si no cruza el umbral', () => {
+    const p = { puntos: 10 };
+    const r = otorgarPuntos(p, 30);
+    expect(r.subioNivel).toBe(false);
+  });
+
+  it('arranca desde 0 si puntos es undefined', () => {
+    const p = {};
+    otorgarPuntos(p, 10);
+    expect(p.puntos).toBe(10);
+  });
+});
+
+describe('actualizarRacha', () => {
+  it('incrementa con éxito y guarda fecha', () => {
+    const p = { racha: 2 };
+    expect(actualizarRacha(p, true)).toBe(3);
+    expect(p.ultimaActividad).toBeInstanceOf(Date);
+  });
+
+  it('reinicia a 0 al fallar', () => {
+    const p = { racha: 5 };
+    expect(actualizarRacha(p, false)).toBe(0);
+  });
+});
+
+describe('formatPuntos', () => {
+  it('incluye puntos, nivel y racha', () => {
+    const msg = formatPuntos({ puntos: 130, racha: 3 });
+    expect(msg).toContain('130');
+    expect(msg).toContain('Nivel *2*');
+    expect(msg).toContain('3');
+  });
+});
+````
+
+## File: tests/onboarding.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import { steps } from '../src/bot/onboarding.js';
+import { STATES } from '../src/bot/states.js';
+
+describe('FSM onboarding — validaciones y transiciones', () => {
+  it('ASK_NOMBRE rechaza nombres muy cortos', () => {
+    const r = steps[STATES.ASK_NOMBRE].handle('a', {});
+    expect(r.ok).toBe(false);
+  });
+
+  it('ASK_NOMBRE acepta y avanza a CARRERA', () => {
+    const p = {};
+    const r = steps[STATES.ASK_NOMBRE].handle('Cristian', p);
+    expect(r).toMatchObject({ ok: true, next: STATES.ASK_CARRERA });
+    expect(p.nombre).toBe('Cristian');
+  });
+
+  it('ASK_SEMESTRE solo acepta 1-14', () => {
+    expect(steps[STATES.ASK_SEMESTRE].handle('0', {}).ok).toBe(false);
+    expect(steps[STATES.ASK_SEMESTRE].handle('15', {}).ok).toBe(false);
+    expect(steps[STATES.ASK_SEMESTRE].handle('6', {}).ok).toBe(true);
+  });
+
+  it('ASK_PROMEDIO acepta coma decimal y rango 0-10', () => {
+    const p = {};
+    expect(steps[STATES.ASK_PROMEDIO].handle('8,5', p).ok).toBe(true);
+    expect(p.promedio).toBe(8.5);
+    expect(steps[STATES.ASK_PROMEDIO].handle('11', {}).ok).toBe(false);
+  });
+
+  it('ASK_ESPECIALIDAD: número selecciona, "aún no lo sé" cae al default', () => {
+    const p = {};
+    steps[STATES.ASK_ESPECIALIDAD].handle('2', p);
+    expect(p.especialidad).toBeTruthy();
+    const p2 = {};
+    steps[STATES.ASK_ESPECIALIDAD].handle('6', p2); // opción extra
+    expect(p2.especialidad).toBe('desarrollo-web');
+  });
+
+  it('ASK_HABILIDADES parte por comas y filtra vacíos', () => {
+    const p = {};
+    const r = steps[STATES.ASK_HABILIDADES].handle('Python, , SQL ,Git', p);
+    expect(r.ok).toBe(true);
+    expect(p.habilidades).toEqual(['Python', 'SQL', 'Git']);
+    expect(r.next).toBe(STATES.ASK_NIVEL);
+  });
+
+  it('ASK_HORARIO parsea día + rango y vuelve a tolerar acentos', () => {
+    const p = {};
+    const r = steps[STATES.ASK_HORARIO].handle('lunes 19:00-21:00, sábado 09:00-13:00', p);
+    expect(r.ok).toBe(true);
+    expect(p.horario).toMatchObject({ lunes: '19:00-21:00', sabado: '09:00-13:00' });
+    expect(r.next).toBe(STATES.DONE);
+  });
+
+  it('ASK_HORARIO rechaza texto sin horario válido', () => {
+    expect(steps[STATES.ASK_HORARIO].handle('cuando pueda', {}).ok).toBe(false);
+  });
+
+  it('EDIT_HABILIDADES vuelve a DONE (no continúa el onboarding)', () => {
+    const r = steps[STATES.EDIT_HABILIDADES].handle('React, Docker', {});
+    expect(r.next).toBe(STATES.DONE);
+  });
+});
+````
+
+## File: tests/progreso.test.js
+````javascript
+import { describe, it, expect } from 'vitest';
+import { generarGraficaProgreso } from '../src/bot/progreso.js';
+
+describe('generarGraficaProgreso', () => {
+  it('muestra mensaje cuando no hay historial', () => {
+    expect(generarGraficaProgreso([], 'datos-ia')).toContain('Aún no tienes historial');
+  });
+
+  it('filtra por la especialidad actual', () => {
+    const scores = [
+      { score: 50, fecha: new Date('2026-05-01'), especialidad: 'datos-ia' },
+      { score: 30, fecha: new Date('2026-05-01'), especialidad: 'ciberseguridad' },
+    ];
+    const g = generarGraficaProgreso(scores, 'datos-ia');
+    expect(g).toContain('50%');
+    expect(g).not.toContain('30%');
+  });
+
+  it('incluye entradas viejas sin especialidad (compat hacia atrás)', () => {
+    const scores = [{ score: 42, fecha: new Date('2026-04-01') }];
+    expect(generarGraficaProgreso(scores, 'datos-ia')).toContain('42%');
+  });
+
+  it('calcula la tendencia entre primera y última medición', () => {
+    const scores = [
+      { score: 20, fecha: new Date('2026-03-01'), especialidad: 'x' },
+      { score: 50, fecha: new Date('2026-05-01'), especialidad: 'x' },
+    ];
+    const g = generarGraficaProgreso(scores, 'x');
+    expect(g).toContain('+30%');
+  });
+});
 ````
 
 ## File: .gitignore
@@ -154,6 +539,10 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.pytest_cache/
+
+# Cobertura de tests
+coverage/
 
 # Artefactos generados
 *.pdf
@@ -1006,6 +1395,72 @@ export function labelDe(key, opciones) {
 }
 ````
 
+## File: src/bot/gamificacion.js
+````javascript
+/**
+ * Sistema de puntos y racha. Cierra el loop de engagement: el /quiz y el check-in
+ * semanal otorgan puntos; mantener actividad semana a semana sube la racha.
+ *
+ * - Puntos: acumulables, definen el nivel (cada 100 puntos = 1 nivel).
+ * - Racha: semanas consecutivas completando el check-in (se reinicia al fallar).
+ *
+ * Todas las funciones MUTAN el profile en memoria; el caller hace save().
+ */
+const PUNTOS_POR_NIVEL = 100;
+
+export function nivel(puntos) {
+  return Math.floor((puntos || 0) / PUNTOS_POR_NIVEL) + 1;
+}
+
+function progresoNivel(puntos) {
+  return (puntos || 0) % PUNTOS_POR_NIVEL; // 0-99
+}
+
+/**
+ * Suma puntos al perfil. Devuelve el total y si subió de nivel.
+ */
+export function otorgarPuntos(profile, cantidad) {
+  const nivelAntes = nivel(profile.puntos);
+  profile.puntos = (profile.puntos || 0) + cantidad;
+  const nivelDespues = nivel(profile.puntos);
+  return {
+    total: profile.puntos,
+    subioNivel: nivelDespues > nivelAntes,
+    nivel: nivelDespues,
+  };
+}
+
+/**
+ * Actualiza la racha semanal: +1 si hubo actividad, 0 si se rompió.
+ */
+export function actualizarRacha(profile, exito) {
+  profile.racha = exito ? (profile.racha || 0) + 1 : 0;
+  profile.ultimaActividad = new Date();
+  return profile.racha;
+}
+
+/**
+ * Mensaje de estado de gamificación para /puntos (Markdown).
+ */
+export function formatPuntos(profile) {
+  const puntos = profile.puntos || 0;
+  const nv = nivel(puntos);
+  const prog = progresoNivel(puntos);
+  const llenos = Math.round(prog / 10);
+  const barra = '█'.repeat(llenos) + '░'.repeat(10 - llenos);
+  const racha = profile.racha || 0;
+  const fuego = racha > 0 ? '🔥'.repeat(Math.min(racha, 5)) : '🥶';
+
+  return (
+    '🏆 *Tu progreso*\n\n' +
+    `⭐ Puntos: *${puntos}*\n` +
+    `📊 Nivel *${nv}*   \`${barra}\`   ${prog}/100\n` +
+    `${fuego} Racha: *${racha}* semana(s)\n\n` +
+    'Gana puntos con /quiz y completando tu check-in semanal de los lunes.'
+  );
+}
+````
+
 ## File: src/bot/onboarding.js
 ````javascript
 import { STATES } from './states.js';
@@ -1425,184 +1880,6 @@ export function generarGraficaProgreso(cvScores, especialidad) {
 }
 ````
 
-## File: src/bot/quiz.js
-````javascript
-import { Markup } from 'telegraf';
-import { z } from 'zod';
-import { config } from '../config.js';
-import { Profile } from '../models/profile.js';
-import { otorgarPuntos } from './gamificacion.js';
-import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
-
-const PUNTOS_POR_ACIERTO = 10;
-
-/**
- * Quiz semanal interactivo. En vez de entregar el plan como un bloque grande de
- * texto, refuerza el aprendizaje con preguntas cortas de opción múltiple y
- * feedback inmediato (el patrón que el paper IJCRT asocia a ~90% de finalización).
- *
- * El estado del quiz en curso vive en memoria (Map por usuario): es efímero
- * (~1 min) y si el bot reinicia, el usuario simplemente hace /quiz de nuevo.
- */
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-const LETRAS = ['A', 'B', 'C', 'D'];
-
-const quizzes = new Map();
-
-const QUIZ_SCHEMA = z.object({
-  preguntas: z
-    .array(
-      z.object({
-        pregunta: z.string().min(1),
-        opciones: z.array(z.string().min(1)).length(4),
-        correcta: z.number().int().min(0).max(3),
-        explicacion: z.string().default(''),
-      })
-    )
-    .min(1),
-});
-
-/**
- * Genera un quiz con Groq sobre los temas dados. Lanza si Groq falla o el JSON
- * no cumple el esquema (el caller decide cómo avisar al usuario).
- *
- * @param {object} profile
- * @param {string[]} temas - skills sobre las que preguntar
- */
-export async function generarQuiz(profile, temas) {
-  const especialidad = profile.especialidad
-    ? labelDe(profile.especialidad, ESPECIALIDADES)
-    : 'tecnología';
-  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'principiante';
-
-  const prompt = `Eres instructor de ${especialidad}. Genera un quiz de 3 preguntas de opción múltiple (4 opciones cada una) para un estudiante nivel ${nivel}, para reforzar: ${temas.join(', ')}.
-
-Devuelve SOLO JSON con esta forma exacta:
-{ "preguntas": [ { "pregunta": "...", "opciones": ["a","b","c","d"], "correcta": 0, "explicacion": "1 frase corta" } ] }
-
-Reglas: preguntas prácticas y concretas (no triviales), en español. "correcta" es el índice (0-3) de la opción correcta. Las 4 opciones plausibles.`;
-
-  const res = await fetch(GROQ_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.groqKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.6,
-      max_tokens: 1200,
-      response_format: { type: 'json_object' },
-    }),
-  });
-  if (!res.ok) throw new Error(`Groq ${res.status}`);
-
-  const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content ?? '';
-  const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
-
-  const result = QUIZ_SCHEMA.safeParse(json);
-  if (!result.success) {
-    throw new Error(`Quiz inválido: ${result.error.issues[0]?.message}`);
-  }
-  return result.data;
-}
-
-/**
- * Renderiza la pregunta actual con botones A/B/C/D. Texto plano (sin Markdown)
- * para no romper el parser con asteriscos/guiones del contenido de Groq.
- */
-function enviarPregunta(ctx, estado) {
-  const q = estado.preguntas[estado.actual];
-  const texto =
-    `❓ Pregunta ${estado.actual + 1}/${estado.preguntas.length}\n\n` +
-    `${q.pregunta}\n\n` +
-    q.opciones.map((o, i) => `${LETRAS[i]}) ${o}`).join('\n');
-
-  const botones = q.opciones.map((_, i) =>
-    Markup.button.callback(LETRAS[i], `quiz:${estado.actual}:${i}`)
-  );
-  return ctx.reply(texto, Markup.inlineKeyboard(botones, { columns: 4 }));
-}
-
-/**
- * Inicia un quiz: genera, guarda el estado y envía la primera pregunta.
- */
-export async function iniciarQuiz(ctx, profile, temas) {
-  const quiz = await generarQuiz(profile, temas);
-  quizzes.set(ctx.from.id, { ...quiz, actual: 0, aciertos: 0 });
-  await enviarPregunta(ctx, quizzes.get(ctx.from.id));
-}
-
-/**
- * Maneja una respuesta (callback_query con data "quiz:<pregunta>:<opcion>").
- * Da feedback inmediato y avanza a la siguiente pregunta o cierra el quiz.
- */
-export async function responderQuiz(ctx) {
-  await ctx.answerCbQuery();
-  const estado = quizzes.get(ctx.from.id);
-  if (!estado) {
-    return ctx.reply('Tu quiz expiró 🙂 Usa /quiz para uno nuevo.');
-  }
-
-  const qIndex = Number(ctx.match[1]);
-  const elegido = Number(ctx.match[2]);
-  if (qIndex !== estado.actual) return; // respuesta vieja o doble tap: ignora
-
-  const q = estado.preguntas[qIndex];
-  const correcto = elegido === q.correcta;
-  if (correcto) estado.aciertos++;
-
-  const feedback =
-    `${q.pregunta}\n\n` +
-    (correcto
-      ? `✅ ¡Correcto! ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`
-      : `❌ Tu respuesta: ${LETRAS[elegido]}. La correcta era ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`) +
-    (q.explicacion ? `\n\n💡 ${q.explicacion}` : '');
-
-  // Reemplaza la pregunta por el feedback (quita los botones)
-  try {
-    await ctx.editMessageText(feedback);
-  } catch {
-    await ctx.reply(feedback);
-  }
-
-  estado.actual++;
-  if (estado.actual < estado.preguntas.length) {
-    await enviarPregunta(ctx, estado);
-  } else {
-    const total = estado.preguntas.length;
-    const aciertos = estado.aciertos;
-    quizzes.delete(ctx.from.id);
-    const animo =
-      aciertos === total
-        ? '¡Perfecto! 🔥'
-        : aciertos >= total / 2
-        ? '¡Bien! Vas por buen camino 💪'
-        : 'Sigue practicando, lo vas a dominar 🌱';
-
-    // Otorga puntos por aciertos (gamificación)
-    let extra = '';
-    const profile = await Profile.findOne({ telegramId: ctx.from.id });
-    if (profile) {
-      const ganados = aciertos * PUNTOS_POR_ACIERTO;
-      const r = otorgarPuntos(profile, ganados);
-      await profile.save();
-      extra = `\n⭐ +${ganados} puntos (total: ${r.total})`;
-      if (r.subioNivel) extra += `\n🎉 ¡Subiste al nivel ${r.nivel}!`;
-    }
-
-    await ctx.reply(
-      `🎯 *Quiz terminado*\nAcertaste *${aciertos}/${total}*. ${animo}${extra}\n\n` +
-        'Usa /plan para seguir tu plan o /puntos para ver tu progreso.',
-      { parse_mode: 'Markdown' }
-    );
-  }
-}
-````
-
 ## File: src/bot/scraper_client.js
 ````javascript
 import { config } from '../config.js';
@@ -1739,78 +2016,6 @@ export const logger = pino({
 });
 ````
 
-## File: src/models/profile.js
-````javascript
-import mongoose from 'mongoose';
-import { STATES } from '../bot/states.js';
-
-/**
- * Perfil del estudiante.
- *
- * Guarda tanto los datos del onboarding como el estado de la conversacion
- * (`conversationState`). Persistir el estado en la base — en vez de en memoria —
- * hace que el bot sobreviva reinicios/redeploys en Railway sin perder el hilo.
- */
-const profileSchema = new mongoose.Schema(
-  {
-    // Identidad de Telegram (clave unica del usuario)
-    telegramId: { type: Number, required: true, unique: true, index: true },
-    username: { type: String },
-
-    // Datos del onboarding
-    nombre: { type: String },
-    carrera: { type: String },
-
-    // Capa de precisión: especialidad dirige mercado/CV/plan/becas.
-    // `especialidad` es requerida tras el onboarding; los perfiles viejos no la
-    // tienen y se migran en caliente (ver requireEspecialidad en index.js).
-    especialidad: { type: String },
-    objetivo: { type: String },   // tipo de empresa (opcional)
-    nivel: { type: String },      // autopercibido: principiante|intermedio|avanzado
-
-    semestre: { type: Number },
-    promedio: { type: Number },
-    habilidades: { type: [String], default: [] },
-
-    // Gamificación (puntos + racha semanal)
-    puntos: { type: Number, default: 0 },
-    racha: { type: Number, default: 0 },
-    ultimaActividad: { type: Date },
-
-    // Datos extra para el CV (los pregunta /cv, no el onboarding)
-    email: { type: String },
-    github: { type: String },
-    linkedin: { type: String },
-    proyectos: { type: [String], default: [] },
-    logros: { type: [String], default: [] },
-
-    // Horario disponible por dia (ej. { lunes: "19:00-21:00", sabado: "09:00-13:00" })
-    horario: { type: Map, of: String, default: {} },
-
-    // Maquina de estados de la conversacion
-    conversationState: {
-      type: String,
-      enum: Object.values(STATES),
-      default: STATES.NEW,
-    },
-
-    // true cuando termino el onboarding completo
-    onboardingCompleto: { type: Boolean, default: false },
-
-    // Historial de scores de compatibilidad CV vs mercado (Fase 3 y 6).
-    // Guarda contra qué especialidad se calculó: si cambias de especialidad,
-    // /progreso filtra para no comparar peras con manzanas.
-    cvScores: {
-      type: [{ score: Number, fecha: Date, especialidad: String }],
-      default: [],
-    },
-  },
-  { timestamps: true } // createdAt + updatedAt automaticos
-);
-
-export const Profile = mongoose.model('Profile', profileSchema);
-````
-
 ## File: .env.example
 ````
 # --- Telegram ---
@@ -1916,7 +2121,15 @@ GROQ_MODEL=llama-3.3-70b-versatile
 
 ## Tests
 
-[PENDIENTE: no hay tests automatizados. Si se añaden, usar Jest para Node y pytest para Python. Lint con `npm run lint` y `ruff check scraper`.]
+- **Node**: Vitest. Corre `npm test`. Tests en `tests/*.test.js`, cubren la lógica
+  pura (matchSkills, recordScore, proyectarEscenarios, gamificación, FSM del
+  onboarding, progreso, especialidades).
+- **Python**: pytest. Corre `cd scraper && python -m pytest`. Test en
+  `scraper/test_logic.py` (extractor, JSON-LD, multi-query, becas) — sin red ni DB,
+  con `monkeypatch` para `_scrape_query`.
+- Regla: la lógica nueva pura va con su test. No se prueban comandos que tocan
+  Telegram/Mongo/Groq end-to-end (se validan a mano).
+- Lint: `npm run lint` y `ruff check scraper`.
 
 ## Commits
 
@@ -1938,7 +2151,8 @@ GROQ_MODEL=llama-3.3-70b-versatile
     "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\"",
     "lint": "eslint src",
     "format": "prettier --write \"**/*.{js,json,md}\"",
-    "format:check": "prettier --check \"**/*.{js,json,md}\""
+    "format:check": "prettier --check \"**/*.{js,json,md}\"",
+    "test": "vitest run"
   },
   "engines": {
     "node": ">=20"
@@ -1959,7 +2173,8 @@ GROQ_MODEL=llama-3.3-70b-versatile
     "concurrently": "^10.0.3",
     "eslint": "^10.6.0",
     "globals": "^17.7.0",
-    "prettier": "^3.9.4"
+    "prettier": "^3.9.4",
+    "vitest": "^4.1.9"
   }
 }
 ````
@@ -2493,6 +2708,184 @@ export function formatCVReport(carrera, score, have, missing) {
 }
 ````
 
+## File: src/bot/quiz.js
+````javascript
+import { Markup } from 'telegraf';
+import { z } from 'zod';
+import { config } from '../config.js';
+import { Profile } from '../models/profile.js';
+import { otorgarPuntos } from './gamificacion.js';
+import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+const PUNTOS_POR_ACIERTO = 10;
+
+/**
+ * Quiz semanal interactivo. En vez de entregar el plan como un bloque grande de
+ * texto, refuerza el aprendizaje con preguntas cortas de opción múltiple y
+ * feedback inmediato (el patrón que el paper IJCRT asocia a ~90% de finalización).
+ *
+ * El estado del quiz en curso vive en memoria (Map por usuario): es efímero
+ * (~1 min) y si el bot reinicia, el usuario simplemente hace /quiz de nuevo.
+ */
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const LETRAS = ['A', 'B', 'C', 'D'];
+
+const quizzes = new Map();
+
+const QUIZ_SCHEMA = z.object({
+  preguntas: z
+    .array(
+      z.object({
+        pregunta: z.string().min(1),
+        opciones: z.array(z.string().min(1)).length(4),
+        correcta: z.number().int().min(0).max(3),
+        explicacion: z.string().default(''),
+      })
+    )
+    .min(1),
+});
+
+/**
+ * Genera un quiz con Groq sobre los temas dados. Lanza si Groq falla o el JSON
+ * no cumple el esquema (el caller decide cómo avisar al usuario).
+ *
+ * @param {object} profile
+ * @param {string[]} temas - skills sobre las que preguntar
+ */
+export async function generarQuiz(profile, temas) {
+  const especialidad = profile.especialidad
+    ? labelDe(profile.especialidad, ESPECIALIDADES)
+    : 'tecnología';
+  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'principiante';
+
+  const prompt = `Eres instructor de ${especialidad}. Genera un quiz de 3 preguntas de opción múltiple (4 opciones cada una) para un estudiante nivel ${nivel}, para reforzar: ${temas.join(', ')}.
+
+Devuelve SOLO JSON con esta forma exacta:
+{ "preguntas": [ { "pregunta": "...", "opciones": ["a","b","c","d"], "correcta": 0, "explicacion": "1 frase corta" } ] }
+
+Reglas: preguntas prácticas y concretas (no triviales), en español. "correcta" es el índice (0-3) de la opción correcta. Las 4 opciones plausibles.`;
+
+  const res = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.groqKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.6,
+      max_tokens: 1200,
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}`);
+
+  const data = await res.json();
+  const raw = data.choices?.[0]?.message?.content ?? '';
+  const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+
+  const result = QUIZ_SCHEMA.safeParse(json);
+  if (!result.success) {
+    throw new Error(`Quiz inválido: ${result.error.issues[0]?.message}`);
+  }
+  return result.data;
+}
+
+/**
+ * Renderiza la pregunta actual con botones A/B/C/D. Texto plano (sin Markdown)
+ * para no romper el parser con asteriscos/guiones del contenido de Groq.
+ */
+function enviarPregunta(ctx, estado) {
+  const q = estado.preguntas[estado.actual];
+  const texto =
+    `❓ Pregunta ${estado.actual + 1}/${estado.preguntas.length}\n\n` +
+    `${q.pregunta}\n\n` +
+    q.opciones.map((o, i) => `${LETRAS[i]}) ${o}`).join('\n');
+
+  const botones = q.opciones.map((_, i) =>
+    Markup.button.callback(LETRAS[i], `quiz:${estado.actual}:${i}`)
+  );
+  return ctx.reply(texto, Markup.inlineKeyboard(botones, { columns: 4 }));
+}
+
+/**
+ * Inicia un quiz: genera, guarda el estado y envía la primera pregunta.
+ */
+export async function iniciarQuiz(ctx, profile, temas) {
+  const quiz = await generarQuiz(profile, temas);
+  quizzes.set(ctx.from.id, { ...quiz, actual: 0, aciertos: 0 });
+  await enviarPregunta(ctx, quizzes.get(ctx.from.id));
+}
+
+/**
+ * Maneja una respuesta (callback_query con data "quiz:<pregunta>:<opcion>").
+ * Da feedback inmediato y avanza a la siguiente pregunta o cierra el quiz.
+ */
+export async function responderQuiz(ctx) {
+  await ctx.answerCbQuery();
+  const estado = quizzes.get(ctx.from.id);
+  if (!estado) {
+    return ctx.reply('Tu quiz expiró 🙂 Usa /quiz para uno nuevo.');
+  }
+
+  const qIndex = Number(ctx.match[1]);
+  const elegido = Number(ctx.match[2]);
+  if (qIndex !== estado.actual) return; // respuesta vieja o doble tap: ignora
+
+  const q = estado.preguntas[qIndex];
+  const correcto = elegido === q.correcta;
+  if (correcto) estado.aciertos++;
+
+  const feedback =
+    `${q.pregunta}\n\n` +
+    (correcto
+      ? `✅ ¡Correcto! ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`
+      : `❌ Tu respuesta: ${LETRAS[elegido]}. La correcta era ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`) +
+    (q.explicacion ? `\n\n💡 ${q.explicacion}` : '');
+
+  // Reemplaza la pregunta por el feedback (quita los botones)
+  try {
+    await ctx.editMessageText(feedback);
+  } catch {
+    await ctx.reply(feedback);
+  }
+
+  estado.actual++;
+  if (estado.actual < estado.preguntas.length) {
+    await enviarPregunta(ctx, estado);
+  } else {
+    const total = estado.preguntas.length;
+    const aciertos = estado.aciertos;
+    quizzes.delete(ctx.from.id);
+    const animo =
+      aciertos === total
+        ? '¡Perfecto! 🔥'
+        : aciertos >= total / 2
+        ? '¡Bien! Vas por buen camino 💪'
+        : 'Sigue practicando, lo vas a dominar 🌱';
+
+    // Otorga puntos por aciertos (gamificación)
+    let extra = '';
+    const profile = await Profile.findOne({ telegramId: ctx.from.id });
+    if (profile) {
+      const ganados = aciertos * PUNTOS_POR_ACIERTO;
+      const r = otorgarPuntos(profile, ganados);
+      await profile.save();
+      extra = `\n⭐ +${ganados} puntos (total: ${r.total})`;
+      if (r.subioNivel) extra += `\n🎉 ¡Subiste al nivel ${r.nivel}!`;
+    }
+
+    await ctx.reply(
+      `🎯 *Quiz terminado*\nAcertaste *${aciertos}/${total}*. ${animo}${extra}\n\n` +
+        'Usa /plan para seguir tu plan o /puntos para ver tu progreso.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+````
+
 ## File: src/bot/scheduler.js
 ````javascript
 import cron from 'node-cron';
@@ -2618,6 +3011,78 @@ export const config = {
   // (cómodo en local); en producción ponlo en ambos .env.
   apiSecret: process.env.API_SECRET_KEY || '',
 };
+````
+
+## File: src/models/profile.js
+````javascript
+import mongoose from 'mongoose';
+import { STATES } from '../bot/states.js';
+
+/**
+ * Perfil del estudiante.
+ *
+ * Guarda tanto los datos del onboarding como el estado de la conversacion
+ * (`conversationState`). Persistir el estado en la base — en vez de en memoria —
+ * hace que el bot sobreviva reinicios/redeploys en Railway sin perder el hilo.
+ */
+const profileSchema = new mongoose.Schema(
+  {
+    // Identidad de Telegram (clave unica del usuario)
+    telegramId: { type: Number, required: true, unique: true, index: true },
+    username: { type: String },
+
+    // Datos del onboarding
+    nombre: { type: String },
+    carrera: { type: String },
+
+    // Capa de precisión: especialidad dirige mercado/CV/plan/becas.
+    // `especialidad` es requerida tras el onboarding; los perfiles viejos no la
+    // tienen y se migran en caliente (ver requireEspecialidad en index.js).
+    especialidad: { type: String },
+    objetivo: { type: String },   // tipo de empresa (opcional)
+    nivel: { type: String },      // autopercibido: principiante|intermedio|avanzado
+
+    semestre: { type: Number },
+    promedio: { type: Number },
+    habilidades: { type: [String], default: [] },
+
+    // Gamificación (puntos + racha semanal)
+    puntos: { type: Number, default: 0 },
+    racha: { type: Number, default: 0 },
+    ultimaActividad: { type: Date },
+
+    // Datos extra para el CV (los pregunta /cv, no el onboarding)
+    email: { type: String },
+    github: { type: String },
+    linkedin: { type: String },
+    proyectos: { type: [String], default: [] },
+    logros: { type: [String], default: [] },
+
+    // Horario disponible por dia (ej. { lunes: "19:00-21:00", sabado: "09:00-13:00" })
+    horario: { type: Map, of: String, default: {} },
+
+    // Maquina de estados de la conversacion
+    conversationState: {
+      type: String,
+      enum: Object.values(STATES),
+      default: STATES.NEW,
+    },
+
+    // true cuando termino el onboarding completo
+    onboardingCompleto: { type: Boolean, default: false },
+
+    // Historial de scores de compatibilidad CV vs mercado (Fase 3 y 6).
+    // Guarda contra qué especialidad se calculó: si cambias de especialidad,
+    // /progreso filtra para no comparar peras con manzanas.
+    cvScores: {
+      type: [{ score: Number, fecha: Date, especialidad: String }],
+      default: [],
+    },
+  },
+  { timestamps: true } // createdAt + updatedAt automaticos
+);
+
+export const Profile = mongoose.model('Profile', profileSchema);
 ````
 
 ## File: scraper/app.py
@@ -3148,7 +3613,7 @@ capturando una rebanada más realista del mercado que un solo slug.
 
 ## Qué NO existe
 
-- Tests (unitarios, integración o e2e)
+- Tests de integración/e2e de los comandos (sí hay unitarios de lógica pura: Vitest + pytest)
 - Autenticación o autorización adicional (solo telegramId implícito)
 - Rate limiting en el bot o en la API Flask
 - Caché en memoria (Redis, etc.)

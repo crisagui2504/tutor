@@ -5,7 +5,7 @@ from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
-from scraper import scrape_occ
+from scraper import scrape_occ, SEED_DATA, DEFAULT_SEED
 from models import save_ranking, get_ranking, list_especialidades
 from becas import filtrar_becas
 
@@ -51,9 +51,16 @@ def skills():
 
     data = get_ranking(especialidad, limit)
     if not data:
-        return jsonify({
-            "error": f"No hay datos para '{especialidad}'. Llama a POST /scrape primero."
-        }), 404
+        # Sin ranking guardado: responde con datos semilla (siempre hay algo).
+        # Así /miCV, /simular y /comparar funcionan sin correr /mercado antes.
+        seed = SEED_DATA.get(especialidad.lower().strip(), DEFAULT_SEED)
+        data = {
+            "especialidad": especialidad.lower(),
+            "skills": seed[:limit],
+            "total_jobs": 100,
+            "updatedAt": None,
+            "source": "seed",
+        }
 
     return jsonify(data)
 

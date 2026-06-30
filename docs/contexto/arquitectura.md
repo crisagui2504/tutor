@@ -103,7 +103,7 @@ capturando una rebanada más realista del mercado que un solo slug.
 | Endpoint | Parámetro clave |
 |----------|-----------------|
 | `POST /scrape` | body `{ especialidad }` (caché 24h) |
-| `GET /skills` | `?especialidad=&limit=` |
+| `GET /skills` | `?especialidad=&limit=` — nunca 404: si no hay ranking, cae a SEED_DATA |
 | `GET /becas` | `?especialidad=&carrera=&limit=` |
 | `GET /especialidades` | (lista las que tienen ranking) |
 

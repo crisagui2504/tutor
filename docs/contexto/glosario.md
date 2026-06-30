@@ -61,6 +61,7 @@
 | `/mercado` | Top 5 skills más pedidas para la carrera |
 | `/miCV` | Score de compatibilidad CV vs mercado |
 | `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
+| `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
 | `/plan` | Plan de estudios de 8 semanas con Groq |
 | `/becas` | Becas filtradas por carrera con días restantes |
 | `/progreso` | Gráfica ASCII del historial de scores |

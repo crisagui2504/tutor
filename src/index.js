@@ -17,6 +17,7 @@ import { generarGraficaProgreso } from './bot/progreso.js';
 import { startScheduler } from './bot/scheduler.js';
 import { cvSteps, generarCV } from './bot/cv_generator.js';
 import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client.js';
+import { ESPECIALIDADES } from './bot/especialidades.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -335,6 +336,67 @@ bot.command(['simular', 'futuro'], async (ctx) => {
   } catch (err) {
     logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /simular');
     await ctx.reply('Hubo un error al simular tu progreso. Intenta más tarde.');
+  }
+});
+
+// /comparar — score del usuario en cada especialidad (refuerza la capa granular)
+bot.command('comparar', async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  if (isRateLimited(ctx.from.id, 'comparar', 30)) {
+    return ctx.reply('Espera unos segundos antes de volver a comparar ⏳');
+  }
+
+  await ctx.sendChatAction('typing');
+  try {
+    // Score del usuario en cada especialidad, en paralelo
+    const resultados = await Promise.all(
+      ESPECIALIDADES.map(async (e) => {
+        try {
+          const res = await scraperSkills(e.key, 10);
+          if (!res.ok) return { ...e, score: null };
+          const data = await res.json();
+          const { score } = matchSkills(profile.habilidades, data.skills || []);
+          return { ...e, score };
+        } catch {
+          return { ...e, score: null };
+        }
+      })
+    );
+
+    const validos = resultados
+      .filter((r) => r.score !== null)
+      .sort((a, b) => b.score - a.score);
+    if (!validos.length) {
+      return ctx.reply('No pude comparar ahora. Intenta más tarde.');
+    }
+
+    const lineas = validos
+      .map((r) => {
+        const marca = r.key === profile.especialidad ? '  👈 tu especialidad' : '';
+        return `${r.emoji} ${r.label} — *${r.score}%*${marca}`;
+      })
+      .join('\n');
+
+    const mejor = validos[0];
+    let cierre = `🏆 Tu mejor match: *${mejor.label}* (${mejor.score}%)`;
+    if (mejor.key !== profile.especialidad) {
+      cierre += '\n\nNo es tu especialidad actual — ¿cambiarte con /especialidad?';
+    } else {
+      cierre += '\n\n¡Vas por buen camino! Usa /plan para cerrar la brecha.';
+    }
+
+    await ctx.reply(
+      '⚖️ *Comparativa de especialidades*\n' +
+        `_Según tus skills: ${profile.habilidades.join(', ')}_\n\n` +
+        `${lineas}\n\n${cierre}`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /comparar');
+    await ctx.reply('Hubo un error al comparar. Intenta más tarde.');
   }
 });
 

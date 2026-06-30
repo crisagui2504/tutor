@@ -350,77 +350,6 @@ Pasos conocidos (del README):
 5. El servicio Python necesita un segundo servicio en Railway con `py scraper/app.py`.
 ````
 
-## File: docs/contexto/glosario.md
-````markdown
-# Glosario
-
-## Entidades del dominio
-
-| Término | Definición |
-|---------|-----------|
-| **Perfil** | Documento MongoDB que representa a un estudiante. Contiene sus datos personales, habilidades, horario, estado de conversación e historial de scores. Una sola colección: `profiles`. |
-| **Carrera** | String libre que el usuario escribe durante el onboarding. Ej: `"ing en sistemas computacionales"`. Es secundaria: la **especialidad** es la que dirige el bot. |
-| **Especialidad** | La "capa de precisión" entre carrera y todo lo demás. Una de 5 keys kebab-case: `desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`, `redes`. Dirige mercado, CV, plan y becas. Definida en `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP`/`SEED_DATA` (Python) — **contrato compartido, las keys deben coincidir**. |
-| **Objetivo** | Tipo de empresa donde quiere trabajar (opcional): `startup`, `corporativo`, `gobierno`, `freelance`, `emprendimiento`. Afina el plan. |
-| **Nivel** | Nivel técnico autopercibido (3 puntos): `principiante`, `intermedio`, `avanzado`. Ajusta la dificultad del plan. |
-| **Habilidades** | Array de strings que el usuario declara tener. Ej: `["JavaScript", "SQL", "Git"]`. Se normalizan con `ALIASES` antes de comparar con el mercado. |
-| **Horario** | Mapa `{ dia: "HH:MM-HH:MM" }` de disponibilidad semanal del estudiante. Se usa para personalizar el plan de estudios. Ej: `{ lunes: "19:00-21:00" }`. |
-| **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
-| **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
-| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
-| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
-
-## Siglas y abreviaciones internas
-
-| Sigla | Significado |
-|-------|------------|
-| **FSM** | Finite State Machine — máquina de estados finita que guía el onboarding conversacional |
-| **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
-| **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
-| **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
-| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
-| **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
-| **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
-| **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
-
-## Estados de la conversación (FSM)
-
-| Estado | Qué espera el bot |
-|--------|------------------|
-| `NEW` | Usuario recién creado, no ha empezado |
-| `ASK_NOMBRE` | Nombre del estudiante |
-| `ASK_CARRERA` | Carrera que estudia |
-| `ASK_ESPECIALIDAD` | Especialidad (menú numerado, dirige el bot) |
-| `ASK_OBJETIVO` | Tipo de empresa (opcional, 0 = saltar) |
-| `ASK_SEMESTRE` | Semestre actual (1-14) |
-| `ASK_PROMEDIO` | Promedio (0-10) |
-| `ASK_HABILIDADES` | Skills separadas por coma |
-| `ASK_NIVEL` | Nivel autopercibido (3 puntos) |
-| `ASK_HORARIO` | Días y rangos horarios |
-| `DONE` | Onboarding completo |
-| `EDIT_HABILIDADES` | Edición puntual de skills (vuelve a DONE) |
-| `EDIT_HORARIO` | Edición puntual de horario (vuelve a DONE) |
-| `EDIT_ESPECIALIDAD` | Edición/migración de especialidad (vuelve a DONE) |
-| `CV_ASK_PROYECTOS` → `CV_ASK_LOGROS` → `CV_ASK_LINKS` → `CV_ASK_EMAIL` | Mini-flujo de `/cv`; el último genera el PDF y vuelve a DONE |
-
-## Comandos del bot
-
-| Comando | Función |
-|---------|---------|
-| `/start` | Inicia o reinicia el onboarding |
-| `/perfil` | Muestra el perfil guardado |
-| `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
-| `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
-| `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
-| `/mercado` | Top 5 skills más pedidas para la carrera |
-| `/miCV` | Score de compatibilidad CV vs mercado |
-| `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
-| `/plan` | Plan de estudios de 8 semanas con Groq |
-| `/becas` | Becas filtradas por carrera con días restantes |
-| `/progreso` | Gráfica ASCII del historial de scores |
-| `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
-````
-
 ## File: eslint.config.js
 ````javascript
 import js from '@eslint/js';
@@ -917,185 +846,6 @@ target-version = "py311"
 # E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear
 select = ["E", "F", "I", "UP", "B"]
 ignore = ["E501"]  # el largo de línea lo maneja el formatter
-````
-
-## File: src/bot/cv_matcher.js
-````javascript
-/**
- * Aliases para normalizar lo que el usuario escribe en el onboarding
- * contra los nombres canonicos del mercado.
- * Ej: "js" -> "JavaScript", "node" -> "Node.js", "ingles" -> "inglés"
- */
-const ALIASES = {
-  js: 'JavaScript', javascript: 'JavaScript',
-  ts: 'TypeScript', typescript: 'TypeScript',
-  'node': 'Node.js', nodejs: 'Node.js', 'node.js': 'Node.js',
-  reactjs: 'React', 'react.js': 'React',
-  vuejs: 'Vue', 'vue.js': 'Vue',
-  angularjs: 'Angular', 'angular.js': 'Angular',
-  py: 'Python',
-  postgres: 'PostgreSQL', postgresql: 'PostgreSQL',
-  mongo: 'MongoDB',
-  k8s: 'Kubernetes',
-  csharp: 'C#',
-  cpp: 'C++',
-  golang: 'Go',
-  dotnet: '.NET', '.net': '.NET',
-  spring: 'Spring Boot', 'spring boot': 'Spring Boot',
-  nestjs: 'NestJS',
-  ml: 'Machine Learning',
-  dl: 'Deep Learning',
-  powerbi: 'Power BI', 'power bi': 'Power BI',
-  ingles: 'inglés', english: 'inglés',
-  'inglés avanzado': 'inglés', 'inglés b2': 'inglés', 'inglés c1': 'inglés',
-  'inglés intermedio': 'inglés', 'inglés técnico': 'inglés',
-};
-
-function normalize(skill) {
-  const lower = skill.toLowerCase().trim();
-  return (ALIASES[lower] || skill.trim()).toLowerCase();
-}
-
-/**
- * Compara las habilidades del usuario contra el top de skills del mercado.
- * Devuelve { score, have, missing }.
- *
- * @param {string[]} userSkills  - profile.habilidades
- * @param {Array<{skill:string}>} marketSkills - top skills del endpoint /skills
- */
-export function matchSkills(userSkills, marketSkills) {
-  const userSet = new Set(userSkills.map(normalize));
-
-  const have = [];
-  const missing = [];
-
-  for (const { skill } of marketSkills) {
-    if (userSet.has(normalize(skill))) {
-      have.push(skill);
-    } else {
-      missing.push(skill);
-    }
-  }
-
-  const score = Math.round((have.length / marketSkills.length) * 100);
-  return { score, have, missing };
-}
-
-/**
- * "Forecasted self": proyecta cómo subiría el score si el usuario aprende las
- * skills que más le faltan (en orden de demanda del mercado). Reutiliza la misma
- * lógica de comparación de matchSkills, pero mirando hacia adelante.
- *
- * @param {string[]} userSkills
- * @param {Array<{skill:string}>} marketSkills - top del mercado, ordenado por demanda
- * @param {number} hasta - cuántas skills proyectar (default 3)
- * @returns {{actual:number, total:number, sinFaltantes:boolean,
- *            escenarios: Array<{skill:string, score:number, delta:number}>}}
- */
-export function proyectarEscenarios(userSkills, marketSkills, hasta = 3) {
-  const { score, have, missing } = matchSkills(userSkills, marketSkills);
-  const total = marketSkills.length;
-
-  const escenarios = [];
-  let prev = score;
-  // missing ya viene en orden de demanda (matchSkills recorre el ranking del mercado)
-  for (let k = 1; k <= Math.min(hasta, missing.length); k++) {
-    const proyectado = Math.round(((have.length + k) / total) * 100);
-    escenarios.push({ skill: missing[k - 1], score: proyectado, delta: proyectado - prev });
-    prev = proyectado;
-  }
-
-  return { actual: score, total, sinFaltantes: missing.length === 0, escenarios };
-}
-
-/**
- * Formatea la proyección "forecasted self" para Telegram (Markdown).
- */
-export function formatProyeccion(proy) {
-  if (proy.sinFaltantes) {
-    return (
-      '🔮 *Tu yo futuro*\n\n' +
-      '¡Ya dominas el top de skills de tu especialidad! 🏆\n' +
-      'Mantente al día con /mercado o cambia de rumbo con /especialidad.'
-    );
-  }
-
-  const lineas = proy.escenarios
-    .map((e) => `✅ + ${e.skill} → *${e.score}%* _(+${e.delta})_`)
-    .join('\n');
-
-  const ultimo = proy.escenarios.at(-1);
-  const totalDelta = ultimo.score - proy.actual;
-
-  return (
-    '🔮 *Tu yo futuro*\n\n' +
-    `Compatibilidad hoy: *${proy.actual}%*\n\n` +
-    'Si aprendes, en orden de demanda del mercado:\n' +
-    `${lineas}\n\n` +
-    `Dominando esas ${proy.escenarios.length} subes a *${ultimo.score}%* (+${totalDelta}) 🚀\n` +
-    'Usa /plan para aprenderlas paso a paso.'
-  );
-}
-
-/**
- * Registra un score en el historial del perfil, con UNA entrada por mes y
- * especialidad. Guarda contra qué especialidad se midió, para que /progreso no
- * compare peras (datos) con manzanas (ciberseguridad) si cambiaste de rumbo.
- *
- * Si ya hay una medición de este mes-año Y misma especialidad, la actualiza
- * (refleja mejoras al volver a correr /miCV el mismo mes); si no, agrega una
- * nueva. Mantiene un máximo de 12 entradas. Muta `profile.cvScores`.
- *
- * @param {{cvScores: Array<{score:number, fecha:Date, especialidad:string}>}} profile
- * @param {number} score
- * @param {string} especialidad
- */
-export function recordScore(profile, score, especialidad) {
-  const ahora = new Date();
-  const mismaEntrada = profile.cvScores.find((s) => {
-    const d = new Date(s.fecha);
-    return (
-      d.getMonth() === ahora.getMonth() &&
-      d.getFullYear() === ahora.getFullYear() &&
-      s.especialidad === especialidad
-    );
-  });
-
-  if (mismaEntrada) {
-    mismaEntrada.score = score;
-    mismaEntrada.fecha = ahora;
-  } else {
-    profile.cvScores.push({ score, fecha: ahora, especialidad });
-    if (profile.cvScores.length > 12) profile.cvScores.shift();
-  }
-}
-
-/**
- * Genera el mensaje de diagnostico para Telegram (formato Markdown).
- */
-export function formatCVReport(carrera, score, have, missing) {
-  const emoji =
-    score >= 80 ? '🔥' : score >= 60 ? '💪' : score >= 40 ? '📈' : '🌱';
-
-  const haveText =
-    have.length > 0
-      ? have.map((s) => `✅ ${s}`).join('\n')
-      : '  _(ninguna del top de mercado aún)_';
-
-  const missingText =
-    missing.length > 0
-      ? missing.map((s) => `❌ ${s}`).join('\n')
-      : '  ¡Ya tienes todo! 🏆';
-
-  return (
-    `${emoji} *Diagnóstico de tu CV*\n\n` +
-    `Carrera: *${carrera}*\n` +
-    `Compatibilidad con el mercado: *${score}%*\n\n` +
-    `*Ya tienes:*\n${haveText}\n\n` +
-    `*Te falta para llegar al 100%:*\n${missingText}\n\n` +
-    `Usa /plan para generar tu plan de estudios personalizado 📅`
-  );
-}
 ````
 
 ## File: src/bot/especialidades.js
@@ -1944,7 +1694,7 @@ capturando una rebanada más realista del mercado que un solo slug.
 | Endpoint | Parámetro clave |
 |----------|-----------------|
 | `POST /scrape` | body `{ especialidad }` (caché 24h) |
-| `GET /skills` | `?especialidad=&limit=` |
+| `GET /skills` | `?especialidad=&limit=` — nunca 404: si no hay ranking, cae a SEED_DATA |
 | `GET /becas` | `?especialidad=&carrera=&limit=` |
 | `GET /especialidades` | (lista las que tienen ranking) |
 
@@ -2046,6 +1796,78 @@ capturando una rebanada más realista del mercado que un solo slug.
 [PENDIENTE: no hay git en el directorio del proyecto. Si se inicializa, usar Conventional Commits: `feat:`, `fix:`, `chore:`.]
 ````
 
+## File: docs/contexto/glosario.md
+````markdown
+# Glosario
+
+## Entidades del dominio
+
+| Término | Definición |
+|---------|-----------|
+| **Perfil** | Documento MongoDB que representa a un estudiante. Contiene sus datos personales, habilidades, horario, estado de conversación e historial de scores. Una sola colección: `profiles`. |
+| **Carrera** | String libre que el usuario escribe durante el onboarding. Ej: `"ing en sistemas computacionales"`. Es secundaria: la **especialidad** es la que dirige el bot. |
+| **Especialidad** | La "capa de precisión" entre carrera y todo lo demás. Una de 5 keys kebab-case: `desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`, `redes`. Dirige mercado, CV, plan y becas. Definida en `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP`/`SEED_DATA` (Python) — **contrato compartido, las keys deben coincidir**. |
+| **Objetivo** | Tipo de empresa donde quiere trabajar (opcional): `startup`, `corporativo`, `gobierno`, `freelance`, `emprendimiento`. Afina el plan. |
+| **Nivel** | Nivel técnico autopercibido (3 puntos): `principiante`, `intermedio`, `avanzado`. Ajusta la dificultad del plan. |
+| **Habilidades** | Array de strings que el usuario declara tener. Ej: `["JavaScript", "SQL", "Git"]`. Se normalizan con `ALIASES` antes de comparar con el mercado. |
+| **Horario** | Mapa `{ dia: "HH:MM-HH:MM" }` de disponibilidad semanal del estudiante. Se usa para personalizar el plan de estudios. Ej: `{ lunes: "19:00-21:00" }`. |
+| **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
+| **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
+| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
+| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
+
+## Siglas y abreviaciones internas
+
+| Sigla | Significado |
+|-------|------------|
+| **FSM** | Finite State Machine — máquina de estados finita que guía el onboarding conversacional |
+| **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
+| **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
+| **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
+| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
+| **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
+| **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
+| **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
+
+## Estados de la conversación (FSM)
+
+| Estado | Qué espera el bot |
+|--------|------------------|
+| `NEW` | Usuario recién creado, no ha empezado |
+| `ASK_NOMBRE` | Nombre del estudiante |
+| `ASK_CARRERA` | Carrera que estudia |
+| `ASK_ESPECIALIDAD` | Especialidad (menú numerado, dirige el bot) |
+| `ASK_OBJETIVO` | Tipo de empresa (opcional, 0 = saltar) |
+| `ASK_SEMESTRE` | Semestre actual (1-14) |
+| `ASK_PROMEDIO` | Promedio (0-10) |
+| `ASK_HABILIDADES` | Skills separadas por coma |
+| `ASK_NIVEL` | Nivel autopercibido (3 puntos) |
+| `ASK_HORARIO` | Días y rangos horarios |
+| `DONE` | Onboarding completo |
+| `EDIT_HABILIDADES` | Edición puntual de skills (vuelve a DONE) |
+| `EDIT_HORARIO` | Edición puntual de horario (vuelve a DONE) |
+| `EDIT_ESPECIALIDAD` | Edición/migración de especialidad (vuelve a DONE) |
+| `CV_ASK_PROYECTOS` → `CV_ASK_LOGROS` → `CV_ASK_LINKS` → `CV_ASK_EMAIL` | Mini-flujo de `/cv`; el último genera el PDF y vuelve a DONE |
+
+## Comandos del bot
+
+| Comando | Función |
+|---------|---------|
+| `/start` | Inicia o reinicia el onboarding |
+| `/perfil` | Muestra el perfil guardado |
+| `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
+| `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
+| `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
+| `/mercado` | Top 5 skills más pedidas para la carrera |
+| `/miCV` | Score de compatibilidad CV vs mercado |
+| `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
+| `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
+| `/plan` | Plan de estudios de 8 semanas con Groq |
+| `/becas` | Becas filtradas por carrera con días restantes |
+| `/progreso` | Gráfica ASCII del historial de scores |
+| `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
+````
+
 ## File: package.json
 ````json
 {
@@ -2096,7 +1918,7 @@ from flask import Flask, jsonify, request
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
-from scraper import scrape_occ
+from scraper import scrape_occ, SEED_DATA, DEFAULT_SEED
 from models import save_ranking, get_ranking, list_especialidades
 from becas import filtrar_becas
 
@@ -2142,9 +1964,16 @@ def skills():
 
     data = get_ranking(especialidad, limit)
     if not data:
-        return jsonify({
-            "error": f"No hay datos para '{especialidad}'. Llama a POST /scrape primero."
-        }), 404
+        # Sin ranking guardado: responde con datos semilla (siempre hay algo).
+        # Así /miCV, /simular y /comparar funcionan sin correr /mercado antes.
+        seed = SEED_DATA.get(especialidad.lower().strip(), DEFAULT_SEED)
+        data = {
+            "especialidad": especialidad.lower(),
+            "skills": seed[:limit],
+            "total_jobs": 100,
+            "updatedAt": None,
+            "source": "seed",
+        }
 
     return jsonify(data)
 
@@ -2594,6 +2423,185 @@ export async function generarCV(profile) {
 }
 ````
 
+## File: src/bot/cv_matcher.js
+````javascript
+/**
+ * Aliases para normalizar lo que el usuario escribe en el onboarding
+ * contra los nombres canonicos del mercado.
+ * Ej: "js" -> "JavaScript", "node" -> "Node.js", "ingles" -> "inglés"
+ */
+const ALIASES = {
+  js: 'JavaScript', javascript: 'JavaScript',
+  ts: 'TypeScript', typescript: 'TypeScript',
+  'node': 'Node.js', nodejs: 'Node.js', 'node.js': 'Node.js',
+  reactjs: 'React', 'react.js': 'React',
+  vuejs: 'Vue', 'vue.js': 'Vue',
+  angularjs: 'Angular', 'angular.js': 'Angular',
+  py: 'Python',
+  postgres: 'PostgreSQL', postgresql: 'PostgreSQL',
+  mongo: 'MongoDB',
+  k8s: 'Kubernetes',
+  csharp: 'C#',
+  cpp: 'C++',
+  golang: 'Go',
+  dotnet: '.NET', '.net': '.NET',
+  spring: 'Spring Boot', 'spring boot': 'Spring Boot',
+  nestjs: 'NestJS',
+  ml: 'Machine Learning',
+  dl: 'Deep Learning',
+  powerbi: 'Power BI', 'power bi': 'Power BI',
+  ingles: 'inglés', english: 'inglés',
+  'inglés avanzado': 'inglés', 'inglés b2': 'inglés', 'inglés c1': 'inglés',
+  'inglés intermedio': 'inglés', 'inglés técnico': 'inglés',
+};
+
+function normalize(skill) {
+  const lower = skill.toLowerCase().trim();
+  return (ALIASES[lower] || skill.trim()).toLowerCase();
+}
+
+/**
+ * Compara las habilidades del usuario contra el top de skills del mercado.
+ * Devuelve { score, have, missing }.
+ *
+ * @param {string[]} userSkills  - profile.habilidades
+ * @param {Array<{skill:string}>} marketSkills - top skills del endpoint /skills
+ */
+export function matchSkills(userSkills, marketSkills) {
+  const userSet = new Set(userSkills.map(normalize));
+
+  const have = [];
+  const missing = [];
+
+  for (const { skill } of marketSkills) {
+    if (userSet.has(normalize(skill))) {
+      have.push(skill);
+    } else {
+      missing.push(skill);
+    }
+  }
+
+  const score = Math.round((have.length / marketSkills.length) * 100);
+  return { score, have, missing };
+}
+
+/**
+ * "Forecasted self": proyecta cómo subiría el score si el usuario aprende las
+ * skills que más le faltan (en orden de demanda del mercado). Reutiliza la misma
+ * lógica de comparación de matchSkills, pero mirando hacia adelante.
+ *
+ * @param {string[]} userSkills
+ * @param {Array<{skill:string}>} marketSkills - top del mercado, ordenado por demanda
+ * @param {number} hasta - cuántas skills proyectar (default 3)
+ * @returns {{actual:number, total:number, sinFaltantes:boolean,
+ *            escenarios: Array<{skill:string, score:number, delta:number}>}}
+ */
+export function proyectarEscenarios(userSkills, marketSkills, hasta = 3) {
+  const { score, have, missing } = matchSkills(userSkills, marketSkills);
+  const total = marketSkills.length;
+
+  const escenarios = [];
+  let prev = score;
+  // missing ya viene en orden de demanda (matchSkills recorre el ranking del mercado)
+  for (let k = 1; k <= Math.min(hasta, missing.length); k++) {
+    const proyectado = Math.round(((have.length + k) / total) * 100);
+    escenarios.push({ skill: missing[k - 1], score: proyectado, delta: proyectado - prev });
+    prev = proyectado;
+  }
+
+  return { actual: score, total, sinFaltantes: missing.length === 0, escenarios };
+}
+
+/**
+ * Formatea la proyección "forecasted self" para Telegram (Markdown).
+ */
+export function formatProyeccion(proy) {
+  if (proy.sinFaltantes) {
+    return (
+      '🔮 *Tu yo futuro*\n\n' +
+      '¡Ya dominas el top de skills de tu especialidad! 🏆\n' +
+      'Mantente al día con /mercado o cambia de rumbo con /especialidad.'
+    );
+  }
+
+  const lineas = proy.escenarios
+    .map((e) => `✅ + ${e.skill} → *${e.score}%* _(+${e.delta})_`)
+    .join('\n');
+
+  const ultimo = proy.escenarios.at(-1);
+  const totalDelta = ultimo.score - proy.actual;
+
+  return (
+    '🔮 *Tu yo futuro*\n\n' +
+    `Compatibilidad hoy: *${proy.actual}%*\n\n` +
+    'Si aprendes, en orden de demanda del mercado:\n' +
+    `${lineas}\n\n` +
+    `Dominando esas ${proy.escenarios.length} subes a *${ultimo.score}%* (+${totalDelta}) 🚀\n` +
+    'Usa /plan para aprenderlas paso a paso.'
+  );
+}
+
+/**
+ * Registra un score en el historial del perfil, con UNA entrada por mes y
+ * especialidad. Guarda contra qué especialidad se midió, para que /progreso no
+ * compare peras (datos) con manzanas (ciberseguridad) si cambiaste de rumbo.
+ *
+ * Si ya hay una medición de este mes-año Y misma especialidad, la actualiza
+ * (refleja mejoras al volver a correr /miCV el mismo mes); si no, agrega una
+ * nueva. Mantiene un máximo de 12 entradas. Muta `profile.cvScores`.
+ *
+ * @param {{cvScores: Array<{score:number, fecha:Date, especialidad:string}>}} profile
+ * @param {number} score
+ * @param {string} especialidad
+ */
+export function recordScore(profile, score, especialidad) {
+  const ahora = new Date();
+  const mismaEntrada = profile.cvScores.find((s) => {
+    const d = new Date(s.fecha);
+    return (
+      d.getMonth() === ahora.getMonth() &&
+      d.getFullYear() === ahora.getFullYear() &&
+      s.especialidad === especialidad
+    );
+  });
+
+  if (mismaEntrada) {
+    mismaEntrada.score = score;
+    mismaEntrada.fecha = ahora;
+  } else {
+    profile.cvScores.push({ score, fecha: ahora, especialidad });
+    if (profile.cvScores.length > 12) profile.cvScores.shift();
+  }
+}
+
+/**
+ * Genera el mensaje de diagnostico para Telegram (formato Markdown).
+ */
+export function formatCVReport(carrera, score, have, missing) {
+  const emoji =
+    score >= 80 ? '🔥' : score >= 60 ? '💪' : score >= 40 ? '📈' : '🌱';
+
+  const haveText =
+    have.length > 0
+      ? have.map((s) => `✅ ${s}`).join('\n')
+      : '  _(ninguna del top de mercado aún)_';
+
+  const missingText =
+    missing.length > 0
+      ? missing.map((s) => `❌ ${s}`).join('\n')
+      : '  ¡Ya tienes todo! 🏆';
+
+  return (
+    `${emoji} *Diagnóstico de tu CV*\n\n` +
+    `Carrera: *${carrera}*\n` +
+    `Compatibilidad con el mercado: *${score}%*\n\n` +
+    `*Ya tienes:*\n${haveText}\n\n` +
+    `*Te falta para llegar al 100%:*\n${missingText}\n\n` +
+    `Usa /plan para generar tu plan de estudios personalizado 📅`
+  );
+}
+````
+
 ## File: src/bot/scheduler.js
 ````javascript
 import cron from 'node-cron';
@@ -2721,6 +2729,256 @@ export const config = {
 };
 ````
 
+## File: scraper/scraper.py
+````python
+import time
+import json
+import random
+import requests
+from bs4 import BeautifulSoup
+from extractor import extract_skills, rank_skills
+
+
+def extract_jsonld_jobs(soup) -> list[str]:
+    """Extrae descripciones de vacantes desde <script type="application/ld+json">.
+
+    Muchos portales de empleo (OCC incluido) inyectan los datos de cada vacante
+    como JSON-LD estructurado (schema.org/JobPosting). Leer eso es mucho más
+    estable que depender de clases CSS de React, que cambian con cada rediseño.
+    """
+    textos = []
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        # El JSON-LD puede venir como objeto, lista o dentro de un @graph
+        if isinstance(data, list):
+            candidatos = data
+        elif isinstance(data, dict):
+            candidatos = data.get("@graph", [data])
+        else:
+            candidatos = []
+
+        for item in candidatos:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                titulo = item.get("title", "") or ""
+                desc = item.get("description", "") or ""
+                if titulo or desc:
+                    textos.append(f"{titulo} {desc}")
+    return textos
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.occ.com.mx/",
+}
+
+# Especialidad (la "capa de precisión") -> query de OCC mucho más específico.
+# Las keys coinciden EXACTAMENTE con src/bot/especialidades.js (contrato compartido).
+# Cada especialidad agrupa VARIOS títulos de OCC: el mercado real publica la
+# misma especialidad bajo nombres distintos. Buscar solo un slug dejaba fuera la
+# mayor parte de las vacantes. scrape_occ itera sobre todos y combina resultados.
+ESPECIALIDAD_MAP = {
+    "desarrollo-web": ["desarrollador-web", "desarrollador-frontend", "desarrollador-full-stack"],
+    "datos-ia": ["data-scientist", "analista-de-datos", "data-engineer"],
+    "ciberseguridad": ["ingeniero-de-ciberseguridad", "analista-de-seguridad", "pentester"],
+    "devops-cloud": ["ingeniero-devops", "ingeniero-cloud", "site-reliability-engineer"],
+    "redes": ["administrador-de-redes", "ingeniero-de-redes", "soporte-de-infraestructura"],
+}
+
+# Datos reales del mercado tech mexicano (fuente: OCC/LinkedIn 2024-2025), uno
+# por especialidad. Es lo que hace que el bot dé consejos específicos aunque OCC
+# bloquee el scraper.
+SEED_DATA = {
+    "desarrollo-web": [
+        {"skill": "JavaScript", "count": 88, "pct": 88},
+        {"skill": "React",      "count": 76, "pct": 76},
+        {"skill": "HTML/CSS",   "count": 72, "pct": 72},
+        {"skill": "Node.js",    "count": 68, "pct": 68},
+        {"skill": "Git",        "count": 65, "pct": 65},
+        {"skill": "TypeScript", "count": 58, "pct": 58},
+        {"skill": "SQL",        "count": 55, "pct": 55},
+        {"skill": "MongoDB",    "count": 42, "pct": 42},
+        {"skill": "Next.js",    "count": 40, "pct": 40},
+        {"skill": "inglés",     "count": 70, "pct": 70},
+    ],
+    "datos-ia": [
+        {"skill": "Python",           "count": 92, "pct": 92},
+        {"skill": "SQL",              "count": 85, "pct": 85},
+        {"skill": "Pandas",           "count": 72, "pct": 72},
+        {"skill": "Machine Learning", "count": 70, "pct": 70},
+        {"skill": "Power BI",         "count": 65, "pct": 65},
+        {"skill": "NumPy",            "count": 60, "pct": 60},
+        {"skill": "Scikit-learn",     "count": 52, "pct": 52},
+        {"skill": "TensorFlow",       "count": 48, "pct": 48},
+        {"skill": "Tableau",          "count": 45, "pct": 45},
+        {"skill": "inglés",           "count": 80, "pct": 80},
+    ],
+    "ciberseguridad": [
+        {"skill": "Linux",     "count": 88, "pct": 88},
+        {"skill": "inglés",    "count": 85, "pct": 85},
+        {"skill": "Bash",      "count": 78, "pct": 78},
+        {"skill": "Python",    "count": 75, "pct": 75},
+        {"skill": "Redes",     "count": 70, "pct": 70},
+        {"skill": "AWS",       "count": 60, "pct": 60},
+        {"skill": "Git",       "count": 55, "pct": 55},
+        {"skill": "Docker",    "count": 52, "pct": 52},
+        {"skill": "SQL",       "count": 50, "pct": 50},
+        {"skill": "Wireshark", "count": 48, "pct": 48},
+    ],
+    "devops-cloud": [
+        {"skill": "Docker",     "count": 85, "pct": 85},
+        {"skill": "AWS",        "count": 78, "pct": 78},
+        {"skill": "Linux",      "count": 75, "pct": 75},
+        {"skill": "Git",        "count": 72, "pct": 72},
+        {"skill": "Kubernetes", "count": 70, "pct": 70},
+        {"skill": "Bash",       "count": 68, "pct": 68},
+        {"skill": "CI/CD",      "count": 65, "pct": 65},
+        {"skill": "Terraform",  "count": 58, "pct": 58},
+        {"skill": "Python",     "count": 55, "pct": 55},
+        {"skill": "Azure",      "count": 50, "pct": 50},
+    ],
+    "redes": [
+        {"skill": "Redes",   "count": 85, "pct": 85},
+        {"skill": "Cisco",   "count": 80, "pct": 80},
+        {"skill": "Linux",   "count": 75, "pct": 75},
+        {"skill": "inglés",  "count": 68, "pct": 68},
+        {"skill": "Bash",    "count": 65, "pct": 65},
+        {"skill": "AWS",     "count": 55, "pct": 55},
+        {"skill": "VPN",     "count": 52, "pct": 52},
+        {"skill": "Azure",   "count": 50, "pct": 50},
+        {"skill": "Python",  "count": 48, "pct": 48},
+        {"skill": "Docker",  "count": 45, "pct": 45},
+    ],
+}
+
+# Fallback generico si la especialidad no tiene seed especifico
+DEFAULT_SEED = SEED_DATA["desarrollo-web"]
+
+
+def especialidad_to_occ_queries(especialidad: str) -> list[str]:
+    """Mapea una especialidad (key kebab-case) a sus títulos de OCC."""
+    return ESPECIALIDAD_MAP.get((especialidad or "").lower().strip(), ["desarrollador-web"])
+
+
+def _scrape_query(session, query: str, max_pages: int) -> tuple[list, int, bool]:
+    """Scrapea un solo título de OCC. Devuelve (skill_lists, jobs, blocked)."""
+    skill_lists = []
+    jobs = 0
+    print(f"  Buscando OCC: '{query}' ({max_pages} páginas)")
+
+    for page in range(1, max_pages + 1):
+        url = f"https://www.occ.com.mx/empleos/de-{query}/?page={page}"
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=15)
+
+            # OCC devuelve 403 o redirige a captcha cuando bloquea
+            if resp.status_code in (403, 429):
+                print(f"    ⚠️  OCC bloqueó la petición (HTTP {resp.status_code})")
+                return skill_lists, jobs, True
+
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Detecta pagina de captcha/bloqueo
+            page_text = soup.get_text(" ", strip=True).lower()
+            if "captcha" in page_text or "acceso denegado" in page_text or len(page_text) < 200:
+                print("    ⚠️  OCC devolvió captcha o página vacía")
+                return skill_lists, jobs, True
+
+            # 1) Preferido: metadata estructurada JSON-LD (estable a cambios de DOM)
+            textos = extract_jsonld_jobs(soup)
+            fuente_pagina = "json-ld"
+
+            # 2) Fallback: selectores CSS de OCC en orden de especificidad
+            if not textos:
+                blocks = (
+                    soup.select("article[data-testid]")           # OCC nuevo
+                    or soup.select("article")                      # generico
+                    or soup.select("[class*='VacancyCard']")       # componente React
+                    or soup.select("[class*='vacancy-card']")
+                    or soup.select("[class*='job-card']")
+                    or soup.select("li[class*='vacancy']")
+                    or soup.select("li[class*='job']")
+                    or ([soup.body] if soup.body else [])          # ultimo recurso
+                )
+                textos = [b.get_text(" ", strip=True) for b in blocks]
+                fuente_pagina = "css"
+
+            hits = 0
+            for text in textos:
+                if len(text) < 40:
+                    continue
+                skills = extract_skills(text)
+                if skills:
+                    skill_lists.append(skills)
+                    jobs += 1
+                    hits += 1
+
+            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | acum query: {jobs}")
+
+        except requests.HTTPError as e:
+            print(f"    HTTP {e.response.status_code} en pág {page}")
+            if e.response.status_code in (403, 429):
+                return skill_lists, jobs, True
+        except Exception as e:
+            print(f"    Error pág {page}: {e}")
+
+        time.sleep(random.uniform(2, 4))
+
+    return skill_lists, jobs, False
+
+
+def scrape_occ(especialidad: str, max_pages: int = 2) -> dict:
+    queries = especialidad_to_occ_queries(especialidad)
+    all_skill_lists = []
+    total_jobs = 0
+    blocked = False
+
+    session = requests.Session()
+    # Visita el home primero para obtener cookies (reduce bloqueos)
+    try:
+        session.get("https://www.occ.com.mx/", headers=HEADERS, timeout=10)
+        time.sleep(1.5)
+    except Exception:
+        pass
+
+    # Itera sobre todos los títulos de la especialidad y combina los resultados.
+    # Menos páginas por query (2) para no disparar el tiempo total ni el bloqueo.
+    for query in queries:
+        skill_lists, jobs, q_blocked = _scrape_query(session, query, max_pages)
+        all_skill_lists.extend(skill_lists)
+        total_jobs += jobs
+        if q_blocked:
+            blocked = True
+            break  # OCC bloquea por IP: no tiene sentido seguir con más queries
+
+    # Si OCC bloqueó o no extrajo nada, usa datos del mercado pre-cargados
+    if blocked or not all_skill_lists:
+        seed = SEED_DATA.get((especialidad or "").lower().strip(), DEFAULT_SEED)
+        print(f"  [SCRAPE] Usando datos pre-cargados para '{especialidad}' ({len(seed)} skills)")
+        return {
+            "skills": seed,
+            "total_jobs": 100,  # estimado basado en OCC 2024-2025
+            "query": ", ".join(queries),
+            "source": "seed",
+        }
+
+    return {
+        "skills": rank_skills(all_skill_lists),
+        "total_jobs": total_jobs,
+        "query": ", ".join(queries),
+        "source": "live",
+    }
+````
+
 ## File: src/index.js
 ````javascript
 import { Telegraf } from 'telegraf';
@@ -2742,6 +3000,7 @@ import { generarGraficaProgreso } from './bot/progreso.js';
 import { startScheduler } from './bot/scheduler.js';
 import { cvSteps, generarCV } from './bot/cv_generator.js';
 import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client.js';
+import { ESPECIALIDADES } from './bot/especialidades.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -3063,6 +3322,67 @@ bot.command(['simular', 'futuro'], async (ctx) => {
   }
 });
 
+// /comparar — score del usuario en cada especialidad (refuerza la capa granular)
+bot.command('comparar', async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  if (isRateLimited(ctx.from.id, 'comparar', 30)) {
+    return ctx.reply('Espera unos segundos antes de volver a comparar ⏳');
+  }
+
+  await ctx.sendChatAction('typing');
+  try {
+    // Score del usuario en cada especialidad, en paralelo
+    const resultados = await Promise.all(
+      ESPECIALIDADES.map(async (e) => {
+        try {
+          const res = await scraperSkills(e.key, 10);
+          if (!res.ok) return { ...e, score: null };
+          const data = await res.json();
+          const { score } = matchSkills(profile.habilidades, data.skills || []);
+          return { ...e, score };
+        } catch {
+          return { ...e, score: null };
+        }
+      })
+    );
+
+    const validos = resultados
+      .filter((r) => r.score !== null)
+      .sort((a, b) => b.score - a.score);
+    if (!validos.length) {
+      return ctx.reply('No pude comparar ahora. Intenta más tarde.');
+    }
+
+    const lineas = validos
+      .map((r) => {
+        const marca = r.key === profile.especialidad ? '  👈 tu especialidad' : '';
+        return `${r.emoji} ${r.label} — *${r.score}%*${marca}`;
+      })
+      .join('\n');
+
+    const mejor = validos[0];
+    let cierre = `🏆 Tu mejor match: *${mejor.label}* (${mejor.score}%)`;
+    if (mejor.key !== profile.especialidad) {
+      cierre += '\n\nNo es tu especialidad actual — ¿cambiarte con /especialidad?';
+    } else {
+      cierre += '\n\n¡Vas por buen camino! Usa /plan para cerrar la brecha.';
+    }
+
+    await ctx.reply(
+      '⚖️ *Comparativa de especialidades*\n' +
+        `_Según tus skills: ${profile.habilidades.join(', ')}_\n\n` +
+        `${lineas}\n\n${cierre}`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /comparar');
+    await ctx.reply('Hubo un error al comparar. Intenta más tarde.');
+  }
+});
+
 // /perfil — muestra lo que el bot sabe de ti
 bot.command('perfil', async (ctx) => {
   const profile = await Profile.findOne({ telegramId: ctx.from.id });
@@ -3189,254 +3509,4 @@ process.once('SIGTERM', async () => {
 });
 
 main();
-````
-
-## File: scraper/scraper.py
-````python
-import time
-import json
-import random
-import requests
-from bs4 import BeautifulSoup
-from extractor import extract_skills, rank_skills
-
-
-def extract_jsonld_jobs(soup) -> list[str]:
-    """Extrae descripciones de vacantes desde <script type="application/ld+json">.
-
-    Muchos portales de empleo (OCC incluido) inyectan los datos de cada vacante
-    como JSON-LD estructurado (schema.org/JobPosting). Leer eso es mucho más
-    estable que depender de clases CSS de React, que cambian con cada rediseño.
-    """
-    textos = []
-    for tag in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(tag.string or "")
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-        # El JSON-LD puede venir como objeto, lista o dentro de un @graph
-        if isinstance(data, list):
-            candidatos = data
-        elif isinstance(data, dict):
-            candidatos = data.get("@graph", [data])
-        else:
-            candidatos = []
-
-        for item in candidatos:
-            if isinstance(item, dict) and item.get("@type") == "JobPosting":
-                titulo = item.get("title", "") or ""
-                desc = item.get("description", "") or ""
-                if titulo or desc:
-                    textos.append(f"{titulo} {desc}")
-    return textos
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://www.occ.com.mx/",
-}
-
-# Especialidad (la "capa de precisión") -> query de OCC mucho más específico.
-# Las keys coinciden EXACTAMENTE con src/bot/especialidades.js (contrato compartido).
-# Cada especialidad agrupa VARIOS títulos de OCC: el mercado real publica la
-# misma especialidad bajo nombres distintos. Buscar solo un slug dejaba fuera la
-# mayor parte de las vacantes. scrape_occ itera sobre todos y combina resultados.
-ESPECIALIDAD_MAP = {
-    "desarrollo-web": ["desarrollador-web", "desarrollador-frontend", "desarrollador-full-stack"],
-    "datos-ia": ["data-scientist", "analista-de-datos", "data-engineer"],
-    "ciberseguridad": ["ingeniero-de-ciberseguridad", "analista-de-seguridad", "pentester"],
-    "devops-cloud": ["ingeniero-devops", "ingeniero-cloud", "site-reliability-engineer"],
-    "redes": ["administrador-de-redes", "ingeniero-de-redes", "soporte-de-infraestructura"],
-}
-
-# Datos reales del mercado tech mexicano (fuente: OCC/LinkedIn 2024-2025), uno
-# por especialidad. Es lo que hace que el bot dé consejos específicos aunque OCC
-# bloquee el scraper.
-SEED_DATA = {
-    "desarrollo-web": [
-        {"skill": "JavaScript", "count": 88, "pct": 88},
-        {"skill": "React",      "count": 76, "pct": 76},
-        {"skill": "HTML/CSS",   "count": 72, "pct": 72},
-        {"skill": "Node.js",    "count": 68, "pct": 68},
-        {"skill": "Git",        "count": 65, "pct": 65},
-        {"skill": "TypeScript", "count": 58, "pct": 58},
-        {"skill": "SQL",        "count": 55, "pct": 55},
-        {"skill": "MongoDB",    "count": 42, "pct": 42},
-        {"skill": "Next.js",    "count": 40, "pct": 40},
-        {"skill": "inglés",     "count": 70, "pct": 70},
-    ],
-    "datos-ia": [
-        {"skill": "Python",           "count": 92, "pct": 92},
-        {"skill": "SQL",              "count": 85, "pct": 85},
-        {"skill": "Pandas",           "count": 72, "pct": 72},
-        {"skill": "Machine Learning", "count": 70, "pct": 70},
-        {"skill": "Power BI",         "count": 65, "pct": 65},
-        {"skill": "NumPy",            "count": 60, "pct": 60},
-        {"skill": "Scikit-learn",     "count": 52, "pct": 52},
-        {"skill": "TensorFlow",       "count": 48, "pct": 48},
-        {"skill": "Tableau",          "count": 45, "pct": 45},
-        {"skill": "inglés",           "count": 80, "pct": 80},
-    ],
-    "ciberseguridad": [
-        {"skill": "Linux",     "count": 88, "pct": 88},
-        {"skill": "inglés",    "count": 85, "pct": 85},
-        {"skill": "Bash",      "count": 78, "pct": 78},
-        {"skill": "Python",    "count": 75, "pct": 75},
-        {"skill": "Redes",     "count": 70, "pct": 70},
-        {"skill": "AWS",       "count": 60, "pct": 60},
-        {"skill": "Git",       "count": 55, "pct": 55},
-        {"skill": "Docker",    "count": 52, "pct": 52},
-        {"skill": "SQL",       "count": 50, "pct": 50},
-        {"skill": "Wireshark", "count": 48, "pct": 48},
-    ],
-    "devops-cloud": [
-        {"skill": "Docker",     "count": 85, "pct": 85},
-        {"skill": "AWS",        "count": 78, "pct": 78},
-        {"skill": "Linux",      "count": 75, "pct": 75},
-        {"skill": "Git",        "count": 72, "pct": 72},
-        {"skill": "Kubernetes", "count": 70, "pct": 70},
-        {"skill": "Bash",       "count": 68, "pct": 68},
-        {"skill": "CI/CD",      "count": 65, "pct": 65},
-        {"skill": "Terraform",  "count": 58, "pct": 58},
-        {"skill": "Python",     "count": 55, "pct": 55},
-        {"skill": "Azure",      "count": 50, "pct": 50},
-    ],
-    "redes": [
-        {"skill": "Redes",   "count": 85, "pct": 85},
-        {"skill": "Cisco",   "count": 80, "pct": 80},
-        {"skill": "Linux",   "count": 75, "pct": 75},
-        {"skill": "inglés",  "count": 68, "pct": 68},
-        {"skill": "Bash",    "count": 65, "pct": 65},
-        {"skill": "AWS",     "count": 55, "pct": 55},
-        {"skill": "VPN",     "count": 52, "pct": 52},
-        {"skill": "Azure",   "count": 50, "pct": 50},
-        {"skill": "Python",  "count": 48, "pct": 48},
-        {"skill": "Docker",  "count": 45, "pct": 45},
-    ],
-}
-
-# Fallback generico si la especialidad no tiene seed especifico
-DEFAULT_SEED = SEED_DATA["desarrollo-web"]
-
-
-def especialidad_to_occ_queries(especialidad: str) -> list[str]:
-    """Mapea una especialidad (key kebab-case) a sus títulos de OCC."""
-    return ESPECIALIDAD_MAP.get((especialidad or "").lower().strip(), ["desarrollador-web"])
-
-
-def _scrape_query(session, query: str, max_pages: int) -> tuple[list, int, bool]:
-    """Scrapea un solo título de OCC. Devuelve (skill_lists, jobs, blocked)."""
-    skill_lists = []
-    jobs = 0
-    print(f"  Buscando OCC: '{query}' ({max_pages} páginas)")
-
-    for page in range(1, max_pages + 1):
-        url = f"https://www.occ.com.mx/empleos/de-{query}/?page={page}"
-        try:
-            resp = session.get(url, headers=HEADERS, timeout=15)
-
-            # OCC devuelve 403 o redirige a captcha cuando bloquea
-            if resp.status_code in (403, 429):
-                print(f"    ⚠️  OCC bloqueó la petición (HTTP {resp.status_code})")
-                return skill_lists, jobs, True
-
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            # Detecta pagina de captcha/bloqueo
-            page_text = soup.get_text(" ", strip=True).lower()
-            if "captcha" in page_text or "acceso denegado" in page_text or len(page_text) < 200:
-                print("    ⚠️  OCC devolvió captcha o página vacía")
-                return skill_lists, jobs, True
-
-            # 1) Preferido: metadata estructurada JSON-LD (estable a cambios de DOM)
-            textos = extract_jsonld_jobs(soup)
-            fuente_pagina = "json-ld"
-
-            # 2) Fallback: selectores CSS de OCC en orden de especificidad
-            if not textos:
-                blocks = (
-                    soup.select("article[data-testid]")           # OCC nuevo
-                    or soup.select("article")                      # generico
-                    or soup.select("[class*='VacancyCard']")       # componente React
-                    or soup.select("[class*='vacancy-card']")
-                    or soup.select("[class*='job-card']")
-                    or soup.select("li[class*='vacancy']")
-                    or soup.select("li[class*='job']")
-                    or ([soup.body] if soup.body else [])          # ultimo recurso
-                )
-                textos = [b.get_text(" ", strip=True) for b in blocks]
-                fuente_pagina = "css"
-
-            hits = 0
-            for text in textos:
-                if len(text) < 40:
-                    continue
-                skills = extract_skills(text)
-                if skills:
-                    skill_lists.append(skills)
-                    jobs += 1
-                    hits += 1
-
-            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | acum query: {jobs}")
-
-        except requests.HTTPError as e:
-            print(f"    HTTP {e.response.status_code} en pág {page}")
-            if e.response.status_code in (403, 429):
-                return skill_lists, jobs, True
-        except Exception as e:
-            print(f"    Error pág {page}: {e}")
-
-        time.sleep(random.uniform(2, 4))
-
-    return skill_lists, jobs, False
-
-
-def scrape_occ(especialidad: str, max_pages: int = 2) -> dict:
-    queries = especialidad_to_occ_queries(especialidad)
-    all_skill_lists = []
-    total_jobs = 0
-    blocked = False
-
-    session = requests.Session()
-    # Visita el home primero para obtener cookies (reduce bloqueos)
-    try:
-        session.get("https://www.occ.com.mx/", headers=HEADERS, timeout=10)
-        time.sleep(1.5)
-    except Exception:
-        pass
-
-    # Itera sobre todos los títulos de la especialidad y combina los resultados.
-    # Menos páginas por query (2) para no disparar el tiempo total ni el bloqueo.
-    for query in queries:
-        skill_lists, jobs, q_blocked = _scrape_query(session, query, max_pages)
-        all_skill_lists.extend(skill_lists)
-        total_jobs += jobs
-        if q_blocked:
-            blocked = True
-            break  # OCC bloquea por IP: no tiene sentido seguir con más queries
-
-    # Si OCC bloqueó o no extrajo nada, usa datos del mercado pre-cargados
-    if blocked or not all_skill_lists:
-        seed = SEED_DATA.get((especialidad or "").lower().strip(), DEFAULT_SEED)
-        print(f"  [SCRAPE] Usando datos pre-cargados para '{especialidad}' ({len(seed)} skills)")
-        return {
-            "skills": seed,
-            "total_jobs": 100,  # estimado basado en OCC 2024-2025
-            "query": ", ".join(queries),
-            "source": "seed",
-        }
-
-    return {
-        "skills": rank_skills(all_skill_lists),
-        "total_jobs": total_jobs,
-        "query": ", ".join(queries),
-        "source": "live",
-    }
 ````

@@ -49,12 +49,15 @@ HEADERS = {
 
 # Especialidad (la "capa de precisión") -> query de OCC mucho más específico.
 # Las keys coinciden EXACTAMENTE con src/bot/especialidades.js (contrato compartido).
+# Cada especialidad agrupa VARIOS títulos de OCC: el mercado real publica la
+# misma especialidad bajo nombres distintos. Buscar solo un slug dejaba fuera la
+# mayor parte de las vacantes. scrape_occ itera sobre todos y combina resultados.
 ESPECIALIDAD_MAP = {
-    "desarrollo-web": "desarrollador-web",
-    "datos-ia": "data-scientist",
-    "ciberseguridad": "ingeniero-de-ciberseguridad",
-    "devops-cloud": "ingeniero-devops",
-    "redes": "administrador-de-redes",
+    "desarrollo-web": ["desarrollador-web", "desarrollador-frontend", "desarrollador-full-stack"],
+    "datos-ia": ["data-scientist", "analista-de-datos", "data-engineer"],
+    "ciberseguridad": ["ingeniero-de-ciberseguridad", "analista-de-seguridad", "pentester"],
+    "devops-cloud": ["ingeniero-devops", "ingeniero-cloud", "site-reliability-engineer"],
+    "redes": ["administrador-de-redes", "ingeniero-de-redes", "soporte-de-infraestructura"],
 }
 
 # Datos reales del mercado tech mexicano (fuente: OCC/LinkedIn 2024-2025), uno
@@ -127,26 +130,16 @@ SEED_DATA = {
 DEFAULT_SEED = SEED_DATA["desarrollo-web"]
 
 
-def especialidad_to_occ_query(especialidad: str) -> str:
-    """Mapea una especialidad (key kebab-case) a un query de OCC específico."""
-    return ESPECIALIDAD_MAP.get((especialidad or "").lower().strip(), "desarrollador-web")
+def especialidad_to_occ_queries(especialidad: str) -> list[str]:
+    """Mapea una especialidad (key kebab-case) a sus títulos de OCC."""
+    return ESPECIALIDAD_MAP.get((especialidad or "").lower().strip(), ["desarrollador-web"])
 
 
-def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
-    query = especialidad_to_occ_query(especialidad)
-    all_skill_lists = []
-    total_jobs = 0
-    blocked = False
-
+def _scrape_query(session, query: str, max_pages: int) -> tuple[list, int, bool]:
+    """Scrapea un solo título de OCC. Devuelve (skill_lists, jobs, blocked)."""
+    skill_lists = []
+    jobs = 0
     print(f"  Buscando OCC: '{query}' ({max_pages} páginas)")
-
-    session = requests.Session()
-    # Visita el home primero para obtener cookies (reduce bloqueos)
-    try:
-        session.get("https://www.occ.com.mx/", headers=HEADERS, timeout=10)
-        time.sleep(1.5)
-    except Exception:
-        pass
 
     for page in range(1, max_pages + 1):
         url = f"https://www.occ.com.mx/empleos/de-{query}/?page={page}"
@@ -156,8 +149,7 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
             # OCC devuelve 403 o redirige a captcha cuando bloquea
             if resp.status_code in (403, 429):
                 print(f"    ⚠️  OCC bloqueó la petición (HTTP {resp.status_code})")
-                blocked = True
-                break
+                return skill_lists, jobs, True
 
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, "html.parser")
@@ -166,8 +158,7 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
             page_text = soup.get_text(" ", strip=True).lower()
             if "captcha" in page_text or "acceso denegado" in page_text or len(page_text) < 200:
                 print("    ⚠️  OCC devolvió captcha o página vacía")
-                blocked = True
-                break
+                return skill_lists, jobs, True
 
             # 1) Preferido: metadata estructurada JSON-LD (estable a cambios de DOM)
             textos = extract_jsonld_jobs(soup)
@@ -194,21 +185,47 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
                     continue
                 skills = extract_skills(text)
                 if skills:
-                    all_skill_lists.append(skills)
-                    total_jobs += 1
+                    skill_lists.append(skills)
+                    jobs += 1
                     hits += 1
 
-            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | total: {total_jobs}")
+            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | acum query: {jobs}")
 
         except requests.HTTPError as e:
             print(f"    HTTP {e.response.status_code} en pág {page}")
             if e.response.status_code in (403, 429):
-                blocked = True
-                break
+                return skill_lists, jobs, True
         except Exception as e:
             print(f"    Error pág {page}: {e}")
 
         time.sleep(random.uniform(2, 4))
+
+    return skill_lists, jobs, False
+
+
+def scrape_occ(especialidad: str, max_pages: int = 2) -> dict:
+    queries = especialidad_to_occ_queries(especialidad)
+    all_skill_lists = []
+    total_jobs = 0
+    blocked = False
+
+    session = requests.Session()
+    # Visita el home primero para obtener cookies (reduce bloqueos)
+    try:
+        session.get("https://www.occ.com.mx/", headers=HEADERS, timeout=10)
+        time.sleep(1.5)
+    except Exception:
+        pass
+
+    # Itera sobre todos los títulos de la especialidad y combina los resultados.
+    # Menos páginas por query (2) para no disparar el tiempo total ni el bloqueo.
+    for query in queries:
+        skill_lists, jobs, q_blocked = _scrape_query(session, query, max_pages)
+        all_skill_lists.extend(skill_lists)
+        total_jobs += jobs
+        if q_blocked:
+            blocked = True
+            break  # OCC bloquea por IP: no tiene sentido seguir con más queries
 
     # Si OCC bloqueó o no extrajo nada, usa datos del mercado pre-cargados
     if blocked or not all_skill_lists:
@@ -217,13 +234,13 @@ def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
         return {
             "skills": seed,
             "total_jobs": 100,  # estimado basado en OCC 2024-2025
-            "query": query,
+            "query": ", ".join(queries),
             "source": "seed",
         }
 
     return {
         "skills": rank_skills(all_skill_lists),
         "total_jobs": total_jobs,
-        "query": query,
+        "query": ", ".join(queries),
         "source": "live",
     }

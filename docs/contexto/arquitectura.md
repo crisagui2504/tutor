@@ -93,6 +93,11 @@ del bot. Las 5 keys (`desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-clo
 exige tocar ambos lados. Todo (`/mercado`, `/miCV`, `/plan`, `/becas`, `/progreso`)
 se filtra por especialidad, no por carrera.
 
+Cada especialidad mapea a **varios títulos de OCC** (ej. `datos-ia` → data-scientist,
+analista-de-datos, data-engineer): `scrape_occ` itera sobre todos y combina los
+resultados (con `max_pages=2` por título para no disparar tiempo ni bloqueos),
+capturando una rebanada más realista del mercado que un solo slug.
+
 ## API del scraper (contrato HTTP)
 
 | Endpoint | Parámetro clave |

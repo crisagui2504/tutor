@@ -74,6 +74,23 @@ src/models/profile.js
 
 # Files
 
+## File: .gitignore
+````
+node_modules/
+.env
+*.log
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Artefactos generados
+*.pdf
+````
+
 ## File: .prettierignore
 ````
 node_modules
@@ -90,135 +107,6 @@ package-lock.json
   "printWidth": 100,
   "tabWidth": 2
 }
-````
-
-## File: eslint.config.js
-````javascript
-import js from '@eslint/js';
-import globals from 'globals';
-
-/**
- * Config plana de ESLint (flat config). Reglas recomendadas + globals de Node.
- * El formato lo maneja Prettier, así que aquí solo van reglas de correctitud.
- */
-export default [
-  {
-    ignores: ['node_modules/**', 'repomix-output.md'],
-  },
-  js.configs.recommended,
-  {
-    files: ['src/**/*.js'],
-    languageOptions: {
-      ecmaVersion: 2023,
-      sourceType: 'module',
-      globals: {
-        ...globals.node,
-      },
-    },
-    rules: {
-      'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
-      'no-console': 'off',
-    },
-  },
-];
-````
-
-## File: scraper/ruff.toml
-````toml
-# Configuración de Ruff (linter/formatter de Python).
-# Uso: pip install ruff && ruff check scraper   (o ruff format scraper)
-line-length = 100
-target-version = "py311"
-
-[lint]
-# E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear
-select = ["E", "F", "I", "UP", "B"]
-ignore = ["E501"]  # el largo de línea lo maneja el formatter
-````
-
-## File: src/bot/scraper_client.js
-````javascript
-import { config } from '../config.js';
-
-/**
- * Cliente del scraper Python. Centraliza la URL base y la autenticación
- * (header X-API-Key) para no repetirla en cada comando. Devuelve el objeto
- * Response de fetch para que el caller maneje res.ok / res.json() como antes.
- */
-function headers(extra = {}) {
-  const h = { ...extra };
-  if (config.apiSecret) h['X-API-Key'] = config.apiSecret;
-  return h;
-}
-
-/** GET /skills?especialidad=&limit= */
-export function scraperSkills(especialidad, limit = 5) {
-  const url = `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(especialidad)}&limit=${limit}`;
-  return fetch(url, { headers: headers() });
-}
-
-/** POST /scrape  body { especialidad } */
-export function scraperScrape(especialidad) {
-  return fetch(`${config.scraperUrl}/scrape`, {
-    method: 'POST',
-    headers: headers({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ especialidad }),
-  });
-}
-
-/** GET /becas?especialidad=&carrera=&limit= */
-export function scraperBecas(especialidad, carrera, limit = 5) {
-  const params = new URLSearchParams({
-    especialidad: especialidad || '',
-    carrera: carrera || '',
-    limit: String(limit),
-  });
-  return fetch(`${config.scraperUrl}/becas?${params}`, { headers: headers() });
-}
-````
-
-## File: .env.example
-````
-# --- Telegram ---
-# Token que te da @BotFather al crear el bot
-BOT_TOKEN=123456:ABC-tu-token-aqui
-
-# --- MongoDB Atlas (tier gratuito 512 MB) ---
-# Cadena de conexion: Atlas > Connect > Drivers
-MONGODB_URI=mongodb+srv://usuario:password@cluster0.xxxxx.mongodb.net/asistente?retryWrites=true&w=majority
-
-# Entorno (development | production)
-NODE_ENV=development
-
-# Nivel de logs (trace | debug | info | warn | error) — opcional, default info
-LOG_LEVEL=info
-
-# --- Auth entre el bot (Node) y el scraper (Python) ---
-# Mismo valor en ambos lados. Vacío = auth desactivada (solo para local).
-# Genera uno con: node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
-API_SECRET_KEY=
-
-# --- Groq (LLM en la nube para /plan) ---
-# Consigue tu key gratis en https://console.groq.com (Settings > API Keys)
-GROQ_API_KEY=gsk_tu-key-aqui
-GROQ_MODEL=llama-3.3-70b-versatile
-````
-
-## File: .gitignore
-````
-node_modules/
-.env
-*.log
-.DS_Store
-
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-
-# Artefactos generados
-*.pdf
 ````
 
 ## File: docs/contexto/arquitectura.md
@@ -318,6 +206,11 @@ del bot. Las 5 keys (`desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-clo
 exige tocar ambos lados. Todo (`/mercado`, `/miCV`, `/plan`, `/becas`, `/progreso`)
 se filtra por especialidad, no por carrera.
 
+Cada especialidad mapea a **varios títulos de OCC** (ej. `datos-ia` → data-scientist,
+analista-de-datos, data-engineer): `scrape_occ` itera sobre todos y combina los
+resultados (con `max_pages=2` por título para no disparar tiempo ni bloqueos),
+capturando una rebanada más realista del mercado que un solo slug.
+
 ## API del scraper (contrato HTTP)
 
 | Endpoint | Parámetro clave |
@@ -338,91 +231,6 @@ se filtra por especialidad, no por carrera.
 - Logs estructurados / observabilidad (solo console.log / print)
 - Multilenguaje (solo español)
 - Variables de entorno en producción cloud (Railway no configurado todavía)
-````
-
-## File: docs/contexto/convenciones.md
-````markdown
-# Convenciones
-
-## Lenguaje y módulos
-
-- **Node.js**: ESM puro (`"type": "module"` en package.json). Usar `import/export`, nunca `require()`.
-- **Python**: módulos sueltos importados directamente (`from scraper import scrape_occ`), sin paquete instalable.
-- **Idioma del código**: español para nombres de dominio (`perfil`, `carrera`, `horario`), inglés para infraestructura (`connectDB`, `matchSkills`, `save_ranking`).
-
-## Naming
-
-| Elemento | Convención | Ejemplo |
-|----------|-----------|---------|
-| Archivos Node | camelCase | `cv_matcher.js`, `onboarding.js` |
-| Archivos Python | snake_case | `scraper.py`, `becas.py` |
-| Funciones Node | camelCase | `matchSkills()`, `generatePlan()` |
-| Funciones Python | snake_case | `filtrar_becas()`, `rank_skills()` |
-| Constantes | UPPER_SNAKE | `STATES`, `SKILLS_CATALOG`, `SEED_DATA` |
-| Colecciones Mongo | plural lowercase | `profiles`, `skill_rankings` |
-| Variables de entorno | UPPER_SNAKE | `BOT_TOKEN`, `MONGODB_URI` |
-
-## Estilo Node.js
-
-- Linter/formatter: **ESLint** (flat config, `eslint.config.js`) + **Prettier** (`.prettierrc.json`). Corre `npm run lint` y `npm run format`. Prettier manda en el estilo (comillas simples, punto y coma, ancho 100).
-- Arrow functions para callbacks cortos; `async function` con nombre para handlers de comandos
-- Mensajes de Telegram con template literals; `parse_mode: 'Markdown'` para negritas/cursivas
-- Límite de 4096 caracteres por mensaje Telegram: cortar si el plan supera la mitad del límite
-
-## Estilo Python
-
-- Type hints en firmas de funciones (`def filtrar_becas(carrera: str, limit: int) -> list[dict]`)
-- Docstring de una línea cuando el propósito no es obvio; sin docstrings extensos
-- `load_dotenv()` al inicio de cada módulo raíz que acceda a env vars
-
-## Patrones que usamos
-
-- **FSM en MongoDB**: el estado de conversación vive en `profile.conversationState`, no en memoria. Permite reinicios sin perder contexto.
-- **Fail-fast en config**: `config.js` llama a `process.exit(1)` si falta una env var requerida.
-- **Seed data como fallback**: cuando el scraper es bloqueado, se devuelven datos reales precargados en vez de error.
-- **Alias normalization**: `cv_matcher.js` normaliza abreviaciones antes de comparar (`js → JavaScript`).
-- **Fix DNS global**: tanto Node (`dns.setServers`) como Python (`dns.resolver.default_resolver`) fuerzan Google DNS al arranque.
-
-## Patrones prohibidos
-
-- No usar `require()` en Node (rompe ESM).
-- No guardar estado de conversación en variables globales (se perdería al reiniciar).
-- No hacer `import *` en Python (dificulta rastrear dependencias).
-- No usar emojis en `print()` de Python sin `chcp 65001` o `PYTHONIOENCODING=utf-8` (rompe en Windows cp1252).
-- No llamar a `bot.launch()` desde más de un proceso (conflicto de polling).
-
-## Logging
-
-- **Node**: usar `logger` de `src/logger.js` (pino), nunca `console.log`/`console.error`.
-  Formato `logger.info({ campo: valor }, 'mensaje')` — el objeto va primero. Pretty en
-  desarrollo, JSON en producción. Excepción: `config.js` usa `console.error` a propósito
-  (fallo de arranque antes de que exista el logger).
-- **Python**: `print()` con prefijo `[SCRAPE]`, `[SCRAPER]`, etc. (sin emojis nuevos).
-
-## Rate limiting
-
-- Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
-  `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
-
-## Comunicación entre servicios
-
-- Todas las llamadas Node→Python pasan por `src/bot/scraper_client.js` (URL base +
-  header `X-API-Key`). No hagas `fetch` directo al scraper desde los comandos.
-- El scraper valida `X-API-Key` contra `API_SECRET_KEY` (si está configurada).
-  Vacía = auth off (solo local). `/health` queda siempre abierto.
-
-## Validación de salida de LLM
-
-- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
-  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
-
-## Tests
-
-[PENDIENTE: no hay tests automatizados. Si se añaden, usar Jest para Node y pytest para Python. Lint con `npm run lint` y `ruff check scraper`.]
-
-## Commits
-
-[PENDIENTE: no hay git en el directorio del proyecto. Si se inicializa, usar Conventional Commits: `feat:`, `fix:`, `chore:`.]
 ````
 
 ## File: docs/contexto/decisiones.md
@@ -735,6 +543,37 @@ Pasos conocidos (del README):
 | `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
 ````
 
+## File: eslint.config.js
+````javascript
+import js from '@eslint/js';
+import globals from 'globals';
+
+/**
+ * Config plana de ESLint (flat config). Reglas recomendadas + globals de Node.
+ * El formato lo maneja Prettier, así que aquí solo van reglas de correctitud.
+ */
+export default [
+  {
+    ignores: ['node_modules/**', 'repomix-output.md'],
+  },
+  js.configs.recommended,
+  {
+    files: ['src/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'module',
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      'no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-console': 'off',
+    },
+  },
+];
+````
+
 ## File: iniciar.bat
 ````batch
 @echo off
@@ -768,47 +607,6 @@ echo (Cierra esta ventana para detener todo)
 echo.
 npm start
 pause
-````
-
-## File: package.json
-````json
-{
-  "name": "asistente-carrera-bot",
-  "version": "0.1.0",
-  "description": "Bot de Telegram que hace onboarding inteligente, diagnostico de brechas y plan de estudios personalizado para estudiantes.",
-  "type": "module",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first src/index.js\" \"py -X utf8 scraper/app.py\"",
-    "bot": "node --dns-result-order=ipv4first src/index.js",
-    "scraper": "py scraper/app.py",
-    "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\"",
-    "lint": "eslint src",
-    "format": "prettier --write \"**/*.{js,json,md}\"",
-    "format:check": "prettier --check \"**/*.{js,json,md}\""
-  },
-  "engines": {
-    "node": ">=20"
-  },
-  "dependencies": {
-    "@google/genai": "^2.10.0",
-    "dotenv": "^16.4.5",
-    "mongoose": "^8.5.1",
-    "node-cron": "^4.5.0",
-    "pdfkit": "^0.19.1",
-    "pino": "^10.3.1",
-    "pino-pretty": "^13.1.3",
-    "telegraf": "^4.16.3",
-    "zod": "^4.4.3"
-  },
-  "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "concurrently": "^10.0.3",
-    "eslint": "^10.6.0",
-    "globals": "^17.7.0",
-    "prettier": "^3.9.4"
-  }
-}
 ````
 
 ## File: Procfile
@@ -925,163 +723,6 @@ estado en `states.js` y su entrada en `onboarding.js`.
 3. Agrega las variables de entorno (incluido `NODE_ENV=production`).
 4. El `Procfile` ya define `worker: npm start`. El scraper Python necesita un
    segundo servicio (`py scraper/app.py`).
-````
-
-## File: scraper/app.py
-````python
-import atexit
-import os
-from datetime import datetime, timezone, timedelta
-from flask import Flask, jsonify, request
-from apscheduler.schedulers.background import BackgroundScheduler
-from dotenv import load_dotenv
-
-from scraper import scrape_occ
-from models import save_ranking, get_ranking, list_especialidades
-from becas import filtrar_becas
-
-load_dotenv()
-
-app = Flask(__name__)
-
-# Secreto compartido con el bot Node. Si está vacío, la auth queda desactivada
-# (cómodo en local); en producción ponlo en ambos .env.
-API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
-
-
-@app.before_request
-def _check_api_key():
-    """Valida el header X-API-Key en todos los endpoints menos /health.
-
-    Solo se exige si API_SECRET_KEY está configurada; así local sigue simple.
-    """
-    if not API_SECRET_KEY or request.path == "/health":
-        return None
-    if request.headers.get("X-API-Key", "") != API_SECRET_KEY:
-        return jsonify({"error": "No autorizado"}), 401
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
-@app.get("/skills")
-def skills():
-    """GET /skills?especialidad=datos-ia&limit=5"""
-    especialidad = request.args.get("especialidad", "").strip()
-    limit = min(int(request.args.get("limit", 5)), 20)
-
-    if not especialidad:
-        return jsonify({"error": "Falta el parámetro 'especialidad'"}), 400
-
-    data = get_ranking(especialidad, limit)
-    if not data:
-        return jsonify({
-            "error": f"No hay datos para '{especialidad}'. Llama a POST /scrape primero."
-        }), 404
-
-    return jsonify(data)
-
-
-# Tiempo que se consideran "frescos" los datos antes de re-scrapear
-CACHE_HOURS = 24
-
-
-def _is_fresh(updated_at_iso: str) -> bool:
-    """True si la fecha ISO es de hace menos de CACHE_HOURS."""
-    try:
-        updated = datetime.fromisoformat(updated_at_iso)
-        if updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) - updated < timedelta(hours=CACHE_HOURS)
-    except (ValueError, TypeError):
-        return False
-
-
-@app.post("/scrape")
-def scrape():
-    """POST /scrape  body: { "especialidad": "datos-ia" }
-
-    Si ya hay datos de hace menos de 24h, no vuelve a scrapear (responde cached).
-    """
-    body = request.get_json(silent=True) or {}
-    especialidad = body.get("especialidad", "").strip()
-
-    if not especialidad:
-        return jsonify({"error": "Falta 'especialidad' en el body"}), 400
-
-    # Cache hit: datos frescos en MongoDB, evita el scrape (responde en <1s)
-    existing = get_ranking(especialidad, limit=1)
-    if existing and _is_fresh(existing.get("updatedAt")):
-        print(f"[SCRAPE] Cache hit para '{especialidad}' (datos de <{CACHE_HOURS}h)")
-        return jsonify({"ok": True, "especialidad": especialidad, "cached": True})
-
-    print(f"[SCRAPE] Scrapeando para: {especialidad}")
-    data = scrape_occ(especialidad)
-    save_ranking(especialidad, data)
-    print(f"[SCRAPE] Guardado: {len(data['skills'])} skills para '{especialidad}'")
-
-    return jsonify({
-        "ok": True,
-        "especialidad": especialidad,
-        "cached": False,
-        "skills_found": len(data["skills"]),
-    })
-
-
-@app.get("/especialidades")
-def especialidades():
-    return jsonify({"especialidades": list_especialidades()})
-
-
-@app.get("/becas")
-def becas():
-    """GET /becas?especialidad=datos-ia&carrera=sistemas&limit=5
-
-    Filtra y ordena por relevancia para la especialidad; carrera es secundaria.
-    """
-    especialidad = request.args.get("especialidad", "").strip()
-    carrera = request.args.get("carrera", "").strip()
-    limit = min(int(request.args.get("limit", 5)), 10)
-    if not especialidad and not carrera:
-        return jsonify({"error": "Falta 'especialidad' o 'carrera'"}), 400
-    resultado = filtrar_becas(especialidad, carrera, limit)
-    return jsonify({"becas": resultado, "total": len(resultado)})
-
-
-# ---------------------------------------------------------------------------
-# Cron semanal (cada lunes a las 6 AM) — re-scrapea todas las especialidades
-# ---------------------------------------------------------------------------
-
-def _weekly_scrape():
-    todas = list_especialidades()
-    print(f"[CRON] Semanal: {len(todas)} especialidades a scrapear")
-    for esp in todas:
-        try:
-            data = scrape_occ(esp)
-            save_ranking(esp, data)
-            print(f"  [CRON] OK {esp}")
-        except Exception as e:
-            print(f"  [CRON] ERROR {esp}: {e}")
-
-
-_scheduler = BackgroundScheduler()
-_scheduler.add_job(_weekly_scrape, "cron", day_of_week="mon", hour=6, minute=0)
-_scheduler.start()
-atexit.register(lambda: _scheduler.shutdown())
-
-
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.getenv("SCRAPER_PORT", 5001))
-    print(f"[SCRAPER] Iniciando en http://localhost:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
 ````
 
 ## File: scraper/becas.py
@@ -1387,587 +1028,17 @@ apscheduler==3.10.4
 python-dotenv==1.0.1
 ````
 
-## File: scraper/scraper.py
-````python
-import time
-import json
-import random
-import requests
-from bs4 import BeautifulSoup
-from extractor import extract_skills, rank_skills
-
-
-def extract_jsonld_jobs(soup) -> list[str]:
-    """Extrae descripciones de vacantes desde <script type="application/ld+json">.
-
-    Muchos portales de empleo (OCC incluido) inyectan los datos de cada vacante
-    como JSON-LD estructurado (schema.org/JobPosting). Leer eso es mucho más
-    estable que depender de clases CSS de React, que cambian con cada rediseño.
-    """
-    textos = []
-    for tag in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(tag.string or "")
-        except (json.JSONDecodeError, TypeError):
-            continue
-
-        # El JSON-LD puede venir como objeto, lista o dentro de un @graph
-        if isinstance(data, list):
-            candidatos = data
-        elif isinstance(data, dict):
-            candidatos = data.get("@graph", [data])
-        else:
-            candidatos = []
-
-        for item in candidatos:
-            if isinstance(item, dict) and item.get("@type") == "JobPosting":
-                titulo = item.get("title", "") or ""
-                desc = item.get("description", "") or ""
-                if titulo or desc:
-                    textos.append(f"{titulo} {desc}")
-    return textos
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://www.occ.com.mx/",
-}
-
-# Especialidad (la "capa de precisión") -> query de OCC mucho más específico.
-# Las keys coinciden EXACTAMENTE con src/bot/especialidades.js (contrato compartido).
-ESPECIALIDAD_MAP = {
-    "desarrollo-web": "desarrollador-web",
-    "datos-ia": "data-scientist",
-    "ciberseguridad": "ingeniero-de-ciberseguridad",
-    "devops-cloud": "ingeniero-devops",
-    "redes": "administrador-de-redes",
-}
-
-# Datos reales del mercado tech mexicano (fuente: OCC/LinkedIn 2024-2025), uno
-# por especialidad. Es lo que hace que el bot dé consejos específicos aunque OCC
-# bloquee el scraper.
-SEED_DATA = {
-    "desarrollo-web": [
-        {"skill": "JavaScript", "count": 88, "pct": 88},
-        {"skill": "React",      "count": 76, "pct": 76},
-        {"skill": "HTML/CSS",   "count": 72, "pct": 72},
-        {"skill": "Node.js",    "count": 68, "pct": 68},
-        {"skill": "Git",        "count": 65, "pct": 65},
-        {"skill": "TypeScript", "count": 58, "pct": 58},
-        {"skill": "SQL",        "count": 55, "pct": 55},
-        {"skill": "MongoDB",    "count": 42, "pct": 42},
-        {"skill": "Next.js",    "count": 40, "pct": 40},
-        {"skill": "inglés",     "count": 70, "pct": 70},
-    ],
-    "datos-ia": [
-        {"skill": "Python",           "count": 92, "pct": 92},
-        {"skill": "SQL",              "count": 85, "pct": 85},
-        {"skill": "Pandas",           "count": 72, "pct": 72},
-        {"skill": "Machine Learning", "count": 70, "pct": 70},
-        {"skill": "Power BI",         "count": 65, "pct": 65},
-        {"skill": "NumPy",            "count": 60, "pct": 60},
-        {"skill": "Scikit-learn",     "count": 52, "pct": 52},
-        {"skill": "TensorFlow",       "count": 48, "pct": 48},
-        {"skill": "Tableau",          "count": 45, "pct": 45},
-        {"skill": "inglés",           "count": 80, "pct": 80},
-    ],
-    "ciberseguridad": [
-        {"skill": "Linux",     "count": 88, "pct": 88},
-        {"skill": "inglés",    "count": 85, "pct": 85},
-        {"skill": "Bash",      "count": 78, "pct": 78},
-        {"skill": "Python",    "count": 75, "pct": 75},
-        {"skill": "Redes",     "count": 70, "pct": 70},
-        {"skill": "AWS",       "count": 60, "pct": 60},
-        {"skill": "Git",       "count": 55, "pct": 55},
-        {"skill": "Docker",    "count": 52, "pct": 52},
-        {"skill": "SQL",       "count": 50, "pct": 50},
-        {"skill": "Wireshark", "count": 48, "pct": 48},
-    ],
-    "devops-cloud": [
-        {"skill": "Docker",     "count": 85, "pct": 85},
-        {"skill": "AWS",        "count": 78, "pct": 78},
-        {"skill": "Linux",      "count": 75, "pct": 75},
-        {"skill": "Git",        "count": 72, "pct": 72},
-        {"skill": "Kubernetes", "count": 70, "pct": 70},
-        {"skill": "Bash",       "count": 68, "pct": 68},
-        {"skill": "CI/CD",      "count": 65, "pct": 65},
-        {"skill": "Terraform",  "count": 58, "pct": 58},
-        {"skill": "Python",     "count": 55, "pct": 55},
-        {"skill": "Azure",      "count": 50, "pct": 50},
-    ],
-    "redes": [
-        {"skill": "Redes",   "count": 85, "pct": 85},
-        {"skill": "Cisco",   "count": 80, "pct": 80},
-        {"skill": "Linux",   "count": 75, "pct": 75},
-        {"skill": "inglés",  "count": 68, "pct": 68},
-        {"skill": "Bash",    "count": 65, "pct": 65},
-        {"skill": "AWS",     "count": 55, "pct": 55},
-        {"skill": "VPN",     "count": 52, "pct": 52},
-        {"skill": "Azure",   "count": 50, "pct": 50},
-        {"skill": "Python",  "count": 48, "pct": 48},
-        {"skill": "Docker",  "count": 45, "pct": 45},
-    ],
-}
-
-# Fallback generico si la especialidad no tiene seed especifico
-DEFAULT_SEED = SEED_DATA["desarrollo-web"]
-
-
-def especialidad_to_occ_query(especialidad: str) -> str:
-    """Mapea una especialidad (key kebab-case) a un query de OCC específico."""
-    return ESPECIALIDAD_MAP.get((especialidad or "").lower().strip(), "desarrollador-web")
-
-
-def scrape_occ(especialidad: str, max_pages: int = 3) -> dict:
-    query = especialidad_to_occ_query(especialidad)
-    all_skill_lists = []
-    total_jobs = 0
-    blocked = False
-
-    print(f"  Buscando OCC: '{query}' ({max_pages} páginas)")
-
-    session = requests.Session()
-    # Visita el home primero para obtener cookies (reduce bloqueos)
-    try:
-        session.get("https://www.occ.com.mx/", headers=HEADERS, timeout=10)
-        time.sleep(1.5)
-    except Exception:
-        pass
-
-    for page in range(1, max_pages + 1):
-        url = f"https://www.occ.com.mx/empleos/de-{query}/?page={page}"
-        try:
-            resp = session.get(url, headers=HEADERS, timeout=15)
-
-            # OCC devuelve 403 o redirige a captcha cuando bloquea
-            if resp.status_code in (403, 429):
-                print(f"    ⚠️  OCC bloqueó la petición (HTTP {resp.status_code})")
-                blocked = True
-                break
-
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
-
-            # Detecta pagina de captcha/bloqueo
-            page_text = soup.get_text(" ", strip=True).lower()
-            if "captcha" in page_text or "acceso denegado" in page_text or len(page_text) < 200:
-                print("    ⚠️  OCC devolvió captcha o página vacía")
-                blocked = True
-                break
-
-            # 1) Preferido: metadata estructurada JSON-LD (estable a cambios de DOM)
-            textos = extract_jsonld_jobs(soup)
-            fuente_pagina = "json-ld"
-
-            # 2) Fallback: selectores CSS de OCC en orden de especificidad
-            if not textos:
-                blocks = (
-                    soup.select("article[data-testid]")           # OCC nuevo
-                    or soup.select("article")                      # generico
-                    or soup.select("[class*='VacancyCard']")       # componente React
-                    or soup.select("[class*='vacancy-card']")
-                    or soup.select("[class*='job-card']")
-                    or soup.select("li[class*='vacancy']")
-                    or soup.select("li[class*='job']")
-                    or ([soup.body] if soup.body else [])          # ultimo recurso
-                )
-                textos = [b.get_text(" ", strip=True) for b in blocks]
-                fuente_pagina = "css"
-
-            hits = 0
-            for text in textos:
-                if len(text) < 40:
-                    continue
-                skills = extract_skills(text)
-                if skills:
-                    all_skill_lists.append(skills)
-                    total_jobs += 1
-                    hits += 1
-
-            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | total: {total_jobs}")
-
-        except requests.HTTPError as e:
-            print(f"    HTTP {e.response.status_code} en pág {page}")
-            if e.response.status_code in (403, 429):
-                blocked = True
-                break
-        except Exception as e:
-            print(f"    Error pág {page}: {e}")
-
-        time.sleep(random.uniform(2, 4))
-
-    # Si OCC bloqueó o no extrajo nada, usa datos del mercado pre-cargados
-    if blocked or not all_skill_lists:
-        seed = SEED_DATA.get((especialidad or "").lower().strip(), DEFAULT_SEED)
-        print(f"  [SCRAPE] Usando datos pre-cargados para '{especialidad}' ({len(seed)} skills)")
-        return {
-            "skills": seed,
-            "total_jobs": 100,  # estimado basado en OCC 2024-2025
-            "query": query,
-            "source": "seed",
-        }
-
-    return {
-        "skills": rank_skills(all_skill_lists),
-        "total_jobs": total_jobs,
-        "query": query,
-        "source": "live",
-    }
-````
-
-## File: src/bot/cv_generator.js
-````javascript
-import PDFDocument from 'pdfkit';
-import { z } from 'zod';
-import { config } from '../config.js';
-import { logger } from '../logger.js';
-import { STATES } from './states.js';
-import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
-
-// Esquema esperado de la respuesta de Groq para el CV. Tolera campos extra y
-// descripción ausente; rechaza cuando faltan los obligatorios o cambian de tipo.
-const CV_SCHEMA = z.object({
-  resumen: z.string().min(1),
-  habilidades: z.record(z.string(), z.array(z.string())),
-  proyectos: z.array(
-    z.object({
-      titulo: z.string().min(1),
-      descripcion: z.string().default(''),
-    })
-  ),
-});
-
-/**
- * Generador de CV estilo Harvard.
- *
- * Responsabilidad separada de cv_matcher.js: el matcher COMPARA skills contra el
- * mercado; este arma el DOCUMENTO. El comando /cv corre un mini-flujo de 4
- * preguntas (estados CV_*) y al final estructura el contenido con Groq y lo
- * renderiza a PDF con PDFKit (Times-Roman, una columna, estilo Harvard).
- */
-
-// ---------------------------------------------------------------------------
-// Mini-flujo de preguntas (estados CV_*). El último paso marca generateCV.
-// ---------------------------------------------------------------------------
-
-const SKIP = new Set(['0', '-', 'no', 'ninguno', 'ninguna', 'saltar', 'skip']);
-
-function splitLineas(text) {
-  return text
-    .split(/[\n;]+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-export const cvSteps = {
-  [STATES.CV_ASK_PROYECTOS]: {
-    prompt: () =>
-      '📄 Vamos a armar tu CV estilo Harvard.\n\n' +
-      '*1/4* — ¿Qué proyectos o experiencia tienes? (aunque sean pequeños)\n' +
-      'Uno por línea o separados por *;*. Escribe *0* para saltar.\n\n' +
-      'Ej: App de tareas en React; Servicio social en sistemas de la escuela',
-    handle: (text, profile) => {
-      const limpio = text.trim().toLowerCase();
-      profile.proyectos = SKIP.has(limpio) ? [] : splitLineas(text);
-      return { ok: true, next: STATES.CV_ASK_LOGROS };
-    },
-  },
-
-  [STATES.CV_ASK_LOGROS]: {
-    prompt: () =>
-      '*2/4* — ¿Tienes logros o reconocimientos? (becas, concursos, certificados)\n' +
-      'Uno por línea o separados por *;*. Escribe *0* para saltar.',
-    handle: (text, profile) => {
-      const limpio = text.trim().toLowerCase();
-      profile.logros = SKIP.has(limpio) ? [] : splitLineas(text);
-      return { ok: true, next: STATES.CV_ASK_LINKS };
-    },
-  },
-
-  [STATES.CV_ASK_LINKS]: {
-    prompt: () =>
-      '*3/4* — ¿Tienes GitHub o LinkedIn? Pega los links (o *0* para saltar).\n\n' +
-      'Ej: github.com/tuusuario, linkedin.com/in/tuusuario',
-    handle: (text, profile) => {
-      const limpio = text.trim().toLowerCase();
-      if (!SKIP.has(limpio)) {
-        const { github, linkedin } = parseLinks(text);
-        if (github) profile.github = github;
-        if (linkedin) profile.linkedin = linkedin;
-      }
-      return { ok: true, next: STATES.CV_ASK_EMAIL };
-    },
-  },
-
-  [STATES.CV_ASK_EMAIL]: {
-    prompt: () =>
-      '*4/4* — ¿Cuál es tu email de contacto? (o *0* para saltar)',
-    handle: (text, profile) => {
-      const limpio = text.trim();
-      if (SKIP.has(limpio.toLowerCase())) {
-        return { ok: true, generateCV: true };
-      }
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(limpio)) {
-        return { ok: false, error: 'Ese email no se ve válido. Escríbelo bien o *0* para saltar 📧' };
-      }
-      profile.email = limpio;
-      return { ok: true, generateCV: true };
-    },
-  },
-};
-
-/**
- * Extrae URLs de GitHub y LinkedIn de texto libre.
- */
-function parseLinks(text) {
-  const result = {};
-  for (const token of text.split(/[\s,]+/)) {
-    const t = token.trim().replace(/^https?:\/\//, '');
-    if (/github\.com/i.test(t)) result.github = t;
-    else if (/linkedin\.com/i.test(t)) result.linkedin = t;
-  }
-  return result;
-}
-
-// ---------------------------------------------------------------------------
-// Estructuración del contenido (Groq + fallback determinista)
-// ---------------------------------------------------------------------------
-
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-
-// Categorización de skills para el fallback (cuando Groq no responde)
-const CATEGORIAS = {
-  Lenguajes: ['javascript', 'typescript', 'python', 'java', 'c#', 'c++', 'php', 'go', 'ruby', 'kotlin', 'swift', 'rust', 'bash', 'r'],
-  Frameworks: ['react', 'angular', 'vue', 'next.js', 'node.js', 'express', 'django', 'flask', 'fastapi', 'spring boot', 'laravel', '.net', 'nestjs', 'tensorflow', 'pytorch', 'pandas', 'numpy', 'scikit-learn'],
-  'Bases de datos': ['sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'oracle', 'sql server'],
-  'Cloud y herramientas': ['aws', 'azure', 'gcp', 'docker', 'kubernetes', 'git', 'github', 'terraform', 'ci/cd', 'jenkins', 'linux', 'power bi', 'tableau', 'cisco', 'wireshark'],
-};
-
-/**
- * Categoriza skills con el mapa local (fallback sin IA).
- */
-function categorizarLocal(habilidades) {
-  const cats = { Lenguajes: [], Frameworks: [], 'Bases de datos': [], 'Cloud y herramientas': [], Otras: [] };
-  for (const skill of habilidades) {
-    const lower = skill.toLowerCase();
-    if (/ingl|franc|alem|portug|español/.test(lower)) continue; // idiomas van aparte
-    let ubicada = false;
-    for (const [cat, lista] of Object.entries(CATEGORIAS)) {
-      if (lista.includes(lower)) {
-        cats[cat].push(skill);
-        ubicada = true;
-        break;
-      }
-    }
-    if (!ubicada) cats.Otras.push(skill);
-  }
-  // Quita categorías vacías
-  return Object.fromEntries(Object.entries(cats).filter(([, v]) => v.length));
-}
-
-/**
- * Estructura los datos del perfil en secciones de CV. Intenta con Groq (resumen
- * profesional + categorización + pulido de proyectos); si falla, usa un armado
- * determinista para que /cv NUNCA quede sin entregar.
- */
-export async function structureCV(profile) {
-  const especialidad = profile.especialidad
-    ? labelDe(profile.especialidad, ESPECIALIDADES)
-    : 'desarrollo de software';
-  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'estudiante';
-
-  const fallback = () => ({
-    resumen:
-      `Estudiante de ${profile.carrera} enfocado en ${especialidad}. ` +
-      `Busca aplicar y seguir desarrollando habilidades en ${profile.habilidades.slice(0, 3).join(', ')}.`,
-    habilidades: categorizarLocal(profile.habilidades),
-    proyectos: (profile.proyectos || []).map((p) => ({ titulo: p, descripcion: '' })),
-  });
-
-  if (!config.groqKey) return fallback();
-
-  const prompt = `Eres un experto en CVs estilo Harvard para estudiantes de tecnología en México.
-Devuelve SOLO un objeto JSON válido (sin texto antes ni después) con esta forma exacta:
-{
-  "resumen": "2 oraciones en español, perfil profesional enfocado en ${especialidad}, nivel ${nivel}",
-  "habilidades": { "Lenguajes": [], "Frameworks": [], "Bases de datos": [], "Cloud y herramientas": [], "Otras": [] },
-  "proyectos": [ { "titulo": "...", "descripcion": "1 oración con verbos de acción y resultado" } ]
-}
-
-Datos del estudiante:
-- Carrera: ${profile.carrera}, semestre ${profile.semestre}
-- Especialidad: ${especialidad}
-- Habilidades: ${profile.habilidades.join(', ')}
-- Proyectos/experiencia (texto crudo): ${(profile.proyectos || []).join(' | ') || 'ninguno'}
-
-Reglas: categoriza cada habilidad en su grupo (omite grupos vacíos). Para proyectos, pule el texto crudo a título + descripción profesional. Si no hay proyectos, devuelve [].`;
-
-  try {
-    const res = await fetch(GROQ_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.groqKey}`,
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0.5,
-        max_tokens: 1200,
-        response_format: { type: 'json_object' },
-      }),
-    });
-    if (!res.ok) throw new Error(`Groq ${res.status}`);
-    const data = await res.json();
-    const raw = data.choices?.[0]?.message?.content ?? '';
-    const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
-
-    // Valida la forma con Zod: si Groq cambia el formato, esto lo detecta y
-    // caemos al fallback en vez de meter basura al PDF.
-    const result = CV_SCHEMA.safeParse(json);
-    if (!result.success) {
-      throw new Error(`Forma inválida: ${result.error.issues[0]?.message}`);
-    }
-    const parsed = result.data;
-
-    // Quita categorías de skills vacías y, si todo quedó vacío, usa el fallback
-    const fb = fallback();
-    const habilidades = Object.fromEntries(
-      Object.entries(parsed.habilidades).filter(([, v]) => v.length)
-    );
-    return {
-      resumen: parsed.resumen,
-      habilidades: Object.keys(habilidades).length ? habilidades : fb.habilidades,
-      proyectos: parsed.proyectos.length ? parsed.proyectos : fb.proyectos,
-    };
-  } catch (err) {
-    logger.warn({ err: err.message, telegramId: profile.telegramId }, 'structureCV cayó a fallback');
-    return fallback();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Renderizado PDF (estilo Harvard)
-// ---------------------------------------------------------------------------
-
-function idiomasDe(habilidades) {
-  const idiomas = ['Español: Nativo'];
-  for (const h of habilidades) {
-    if (/ingl[eé]s|franc[eé]s|alem[aá]n|portugu[eé]s/i.test(h)) {
-      idiomas.push(h.charAt(0).toUpperCase() + h.slice(1));
-    }
-  }
-  return idiomas;
-}
-
-function seccion(doc, titulo) {
-  doc.moveDown(0.6);
-  doc.font('Times-Bold').fontSize(11.5).fillColor('#000').text(titulo.toUpperCase());
-  const y = doc.y + 1.5;
-  doc
-    .moveTo(doc.page.margins.left, y)
-    .lineTo(doc.page.width - doc.page.margins.right, y)
-    .lineWidth(0.7)
-    .stroke();
-  doc.moveDown(0.35);
-}
-
-/**
- * Construye el PDF y lo devuelve como Buffer.
- * @returns {Promise<Buffer>}
- */
-export function buildPDF(profile, structured) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({
-      size: 'LETTER',
-      margins: { top: 50, bottom: 50, left: 60, right: 60 },
-    });
-    const chunks = [];
-    doc.on('data', (c) => chunks.push(c));
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
-
-    // --- Encabezado: nombre centrado + contacto ---
-    doc.font('Times-Bold').fontSize(20).text(profile.nombre.toUpperCase(), { align: 'center' });
-    const contacto = [profile.email, profile.github, profile.linkedin].filter(Boolean).join('   |   ');
-    if (contacto) {
-      doc.font('Times-Roman').fontSize(10).text(contacto, { align: 'center' });
-    }
-    const yLine = doc.y + 3;
-    doc
-      .moveTo(doc.page.margins.left, yLine)
-      .lineTo(doc.page.width - doc.page.margins.right, yLine)
-      .lineWidth(1.2)
-      .stroke();
-    doc.moveDown(0.5);
-
-    // --- Perfil ---
-    if (structured.resumen) {
-      seccion(doc, 'Perfil Profesional');
-      doc.font('Times-Roman').fontSize(10.5).text(structured.resumen, { align: 'justify' });
-    }
-
-    // --- Educación (primero: es lo más fuerte de un estudiante) ---
-    seccion(doc, 'Educación');
-    doc.font('Times-Bold').fontSize(11).text(profile.carrera);
-    let sub = `Semestre ${profile.semestre}`;
-    if (profile.promedio >= 8) sub += `   ·   Promedio: ${profile.promedio}`;
-    doc.font('Times-Roman').fontSize(10).text(sub);
-
-    // --- Habilidades técnicas (categorizadas) ---
-    const cats = structured.habilidades || {};
-    if (Object.keys(cats).length) {
-      seccion(doc, 'Habilidades Técnicas');
-      for (const [cat, items] of Object.entries(cats)) {
-        doc.font('Times-Bold').fontSize(10).text(`${cat}: `, { continued: true });
-        doc.font('Times-Roman').text(items.join(', '));
-      }
-    }
-
-    // --- Proyectos ---
-    if (structured.proyectos?.length) {
-      seccion(doc, 'Proyectos y Experiencia');
-      for (const p of structured.proyectos) {
-        doc.font('Times-Bold').fontSize(10.5).text(p.titulo || p);
-        if (p.descripcion) {
-          doc.font('Times-Roman').fontSize(10).text(p.descripcion, { indent: 12 });
-        }
-        doc.moveDown(0.2);
-      }
-    }
-
-    // --- Logros ---
-    if (profile.logros?.length) {
-      seccion(doc, 'Logros y Reconocimientos');
-      for (const l of profile.logros) {
-        doc.font('Times-Roman').fontSize(10).text(`•  ${l}`);
-      }
-    }
-
-    // --- Idiomas ---
-    seccion(doc, 'Idiomas');
-    doc.font('Times-Roman').fontSize(10).text(idiomasDe(profile.habilidades).join('   ·   '));
-
-    doc.end();
-  });
-}
-
-/**
- * Orquesta todo: estructura el contenido y construye el PDF.
- * @returns {Promise<{buffer: Buffer, filename: string}>}
- */
-export async function generarCV(profile) {
-  const structured = await structureCV(profile);
-  const buffer = await buildPDF(profile, structured);
-  const slug = (profile.nombre || 'CV').replace(/\s+/g, '_');
-  return { buffer, filename: `CV_${slug}.pdf` };
-}
+## File: scraper/ruff.toml
+````toml
+# Configuración de Ruff (linter/formatter de Python).
+# Uso: pip install ruff && ruff check scraper   (o ruff format scraper)
+line-length = 100
+target-version = "py311"
+
+[lint]
+# E/F = pyflakes+pycodestyle, I = isort, UP = pyupgrade, B = bugbear
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # el largo de línea lo maneja el formatter
 ````
 
 ## File: src/bot/cv_matcher.js
@@ -2602,6 +1673,1119 @@ export function generarGraficaProgreso(cvScores, especialidad) {
 }
 ````
 
+## File: src/bot/scraper_client.js
+````javascript
+import { config } from '../config.js';
+
+/**
+ * Cliente del scraper Python. Centraliza la URL base y la autenticación
+ * (header X-API-Key) para no repetirla en cada comando. Devuelve el objeto
+ * Response de fetch para que el caller maneje res.ok / res.json() como antes.
+ */
+function headers(extra = {}) {
+  const h = { ...extra };
+  if (config.apiSecret) h['X-API-Key'] = config.apiSecret;
+  return h;
+}
+
+/** GET /skills?especialidad=&limit= */
+export function scraperSkills(especialidad, limit = 5) {
+  const url = `${config.scraperUrl}/skills?especialidad=${encodeURIComponent(especialidad)}&limit=${limit}`;
+  return fetch(url, { headers: headers() });
+}
+
+/** POST /scrape  body { especialidad } */
+export function scraperScrape(especialidad) {
+  return fetch(`${config.scraperUrl}/scrape`, {
+    method: 'POST',
+    headers: headers({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ especialidad }),
+  });
+}
+
+/** GET /becas?especialidad=&carrera=&limit= */
+export function scraperBecas(especialidad, carrera, limit = 5) {
+  const params = new URLSearchParams({
+    especialidad: especialidad || '',
+    carrera: carrera || '',
+    limit: String(limit),
+  });
+  return fetch(`${config.scraperUrl}/becas?${params}`, { headers: headers() });
+}
+````
+
+## File: src/bot/states.js
+````javascript
+/**
+ * Estados de la maquina de conversacion (el "formulario invisible").
+ *
+ * Cada mensaje del usuario hace avanzar al siguiente estado. El estado actual
+ * vive en `profile.conversationState` en MongoDB.
+ *
+ * Flujo del onboarding:
+ *   NEW -> ASK_NOMBRE -> ASK_CARRERA -> ASK_SEMESTRE -> ASK_PROMEDIO
+ *       -> ASK_HABILIDADES -> ASK_HORARIO -> DONE
+ */
+export const STATES = {
+  NEW: 'NEW',                     // recien creado, aun no empieza
+  ASK_NOMBRE: 'ASK_NOMBRE',
+  ASK_CARRERA: 'ASK_CARRERA',
+  ASK_ESPECIALIDAD: 'ASK_ESPECIALIDAD', // hacia donde va (dirige todo el bot)
+  ASK_OBJETIVO: 'ASK_OBJETIVO',         // tipo de empresa (opcional)
+  ASK_SEMESTRE: 'ASK_SEMESTRE',
+  ASK_PROMEDIO: 'ASK_PROMEDIO',
+  ASK_HABILIDADES: 'ASK_HABILIDADES',
+  ASK_NIVEL: 'ASK_NIVEL',               // nivel autopercibido (3 puntos)
+  ASK_HORARIO: 'ASK_HORARIO',
+  DONE: 'DONE',                   // onboarding terminado
+
+  // Edicion puntual (post-onboarding): editan un solo campo y vuelven a DONE
+  // sin re-preguntar todo. Los activan los comandos /habilidades, /horario, /especialidad.
+  EDIT_HABILIDADES: 'EDIT_HABILIDADES',
+  EDIT_HORARIO: 'EDIT_HORARIO',
+  EDIT_ESPECIALIDAD: 'EDIT_ESPECIALIDAD',
+
+  // Mini-flujo del comando /cv (independiente del onboarding). Al terminar
+  // genera el PDF en vez de volver al menú.
+  CV_ASK_PROYECTOS: 'CV_ASK_PROYECTOS',
+  CV_ASK_LOGROS: 'CV_ASK_LOGROS',
+  CV_ASK_LINKS: 'CV_ASK_LINKS',
+  CV_ASK_EMAIL: 'CV_ASK_EMAIL',
+};
+````
+
+## File: src/db.js
+````javascript
+import dns from 'dns';
+import mongoose from 'mongoose';
+import { config } from './config.js';
+import { logger } from './logger.js';
+
+// Fuerza a Node.js a usar Google DNS, por si el DNS local falla con SRV records
+dns.setServers(['8.8.8.8', '8.8.4.4']);
+
+/**
+ * Conecta a MongoDB Atlas. Mongoose mantiene un pool de conexiones,
+ * asi que se llama una sola vez al arrancar.
+ */
+export async function connectDB() {
+  mongoose.set('strictQuery', true);
+  await mongoose.connect(config.mongoUri);
+  logger.info('✅ Conectado a MongoDB');
+}
+
+export async function disconnectDB() {
+  await mongoose.disconnect();
+  logger.info('🔌 Desconectado de MongoDB');
+}
+````
+
+## File: src/logger.js
+````javascript
+import pino from 'pino';
+
+/**
+ * Logger estructurado para toda la app.
+ *
+ * - En desarrollo: salida bonita y coloreada (pino-pretty) para leer en consola.
+ * - En producción: JSON puro, que Railway/Logtail pueden indexar y filtrar.
+ *
+ * Nivel configurable con LOG_LEVEL (default: info).
+ */
+const isDev = (process.env.NODE_ENV || 'development') !== 'production';
+
+export const logger = pino({
+  level: process.env.LOG_LEVEL || 'info',
+  transport: isDev
+    ? {
+        target: 'pino-pretty',
+        options: {
+          colorize: true,
+          translateTime: 'HH:MM:ss',
+          ignore: 'pid,hostname',
+        },
+      }
+    : undefined,
+});
+````
+
+## File: src/models/profile.js
+````javascript
+import mongoose from 'mongoose';
+import { STATES } from '../bot/states.js';
+
+/**
+ * Perfil del estudiante.
+ *
+ * Guarda tanto los datos del onboarding como el estado de la conversacion
+ * (`conversationState`). Persistir el estado en la base — en vez de en memoria —
+ * hace que el bot sobreviva reinicios/redeploys en Railway sin perder el hilo.
+ */
+const profileSchema = new mongoose.Schema(
+  {
+    // Identidad de Telegram (clave unica del usuario)
+    telegramId: { type: Number, required: true, unique: true, index: true },
+    username: { type: String },
+
+    // Datos del onboarding
+    nombre: { type: String },
+    carrera: { type: String },
+
+    // Capa de precisión: especialidad dirige mercado/CV/plan/becas.
+    // `especialidad` es requerida tras el onboarding; los perfiles viejos no la
+    // tienen y se migran en caliente (ver requireEspecialidad en index.js).
+    especialidad: { type: String },
+    objetivo: { type: String },   // tipo de empresa (opcional)
+    nivel: { type: String },      // autopercibido: principiante|intermedio|avanzado
+
+    semestre: { type: Number },
+    promedio: { type: Number },
+    habilidades: { type: [String], default: [] },
+
+    // Datos extra para el CV (los pregunta /cv, no el onboarding)
+    email: { type: String },
+    github: { type: String },
+    linkedin: { type: String },
+    proyectos: { type: [String], default: [] },
+    logros: { type: [String], default: [] },
+
+    // Horario disponible por dia (ej. { lunes: "19:00-21:00", sabado: "09:00-13:00" })
+    horario: { type: Map, of: String, default: {} },
+
+    // Maquina de estados de la conversacion
+    conversationState: {
+      type: String,
+      enum: Object.values(STATES),
+      default: STATES.NEW,
+    },
+
+    // true cuando termino el onboarding completo
+    onboardingCompleto: { type: Boolean, default: false },
+
+    // Historial de scores de compatibilidad CV vs mercado (Fase 3 y 6).
+    // Guarda contra qué especialidad se calculó: si cambias de especialidad,
+    // /progreso filtra para no comparar peras con manzanas.
+    cvScores: {
+      type: [{ score: Number, fecha: Date, especialidad: String }],
+      default: [],
+    },
+  },
+  { timestamps: true } // createdAt + updatedAt automaticos
+);
+
+export const Profile = mongoose.model('Profile', profileSchema);
+````
+
+## File: .env.example
+````
+# --- Telegram ---
+# Token que te da @BotFather al crear el bot
+BOT_TOKEN=123456:ABC-tu-token-aqui
+
+# --- MongoDB Atlas (tier gratuito 512 MB) ---
+# Cadena de conexion: Atlas > Connect > Drivers
+MONGODB_URI=mongodb+srv://usuario:password@cluster0.xxxxx.mongodb.net/asistente?retryWrites=true&w=majority
+
+# Entorno (development | production)
+NODE_ENV=development
+
+# Nivel de logs (trace | debug | info | warn | error) — opcional, default info
+LOG_LEVEL=info
+
+# --- Auth entre el bot (Node) y el scraper (Python) ---
+# Mismo valor en ambos lados. Vacío = auth desactivada (solo para local).
+# Genera uno con: node -e "console.log(require('crypto').randomBytes(24).toString('hex'))"
+API_SECRET_KEY=
+
+# --- Groq (LLM en la nube para /plan) ---
+# Consigue tu key gratis en https://console.groq.com (Settings > API Keys)
+GROQ_API_KEY=gsk_tu-key-aqui
+GROQ_MODEL=llama-3.3-70b-versatile
+````
+
+## File: docs/contexto/convenciones.md
+````markdown
+# Convenciones
+
+## Lenguaje y módulos
+
+- **Node.js**: ESM puro (`"type": "module"` en package.json). Usar `import/export`, nunca `require()`.
+- **Python**: módulos sueltos importados directamente (`from scraper import scrape_occ`), sin paquete instalable.
+- **Idioma del código**: español para nombres de dominio (`perfil`, `carrera`, `horario`), inglés para infraestructura (`connectDB`, `matchSkills`, `save_ranking`).
+
+## Naming
+
+| Elemento | Convención | Ejemplo |
+|----------|-----------|---------|
+| Archivos Node | camelCase | `cv_matcher.js`, `onboarding.js` |
+| Archivos Python | snake_case | `scraper.py`, `becas.py` |
+| Funciones Node | camelCase | `matchSkills()`, `generatePlan()` |
+| Funciones Python | snake_case | `filtrar_becas()`, `rank_skills()` |
+| Constantes | UPPER_SNAKE | `STATES`, `SKILLS_CATALOG`, `SEED_DATA` |
+| Colecciones Mongo | plural lowercase | `profiles`, `skill_rankings` |
+| Variables de entorno | UPPER_SNAKE | `BOT_TOKEN`, `MONGODB_URI` |
+
+## Estilo Node.js
+
+- Linter/formatter: **ESLint** (flat config, `eslint.config.js`) + **Prettier** (`.prettierrc.json`). Corre `npm run lint` y `npm run format`. Prettier manda en el estilo (comillas simples, punto y coma, ancho 100).
+- Arrow functions para callbacks cortos; `async function` con nombre para handlers de comandos
+- Mensajes de Telegram con template literals; `parse_mode: 'Markdown'` para negritas/cursivas
+- Límite de 4096 caracteres por mensaje Telegram: cortar si el plan supera la mitad del límite
+
+## Estilo Python
+
+- Type hints en firmas de funciones (`def filtrar_becas(carrera: str, limit: int) -> list[dict]`)
+- Docstring de una línea cuando el propósito no es obvio; sin docstrings extensos
+- `load_dotenv()` al inicio de cada módulo raíz que acceda a env vars
+
+## Patrones que usamos
+
+- **FSM en MongoDB**: el estado de conversación vive en `profile.conversationState`, no en memoria. Permite reinicios sin perder contexto.
+- **Fail-fast en config**: `config.js` llama a `process.exit(1)` si falta una env var requerida.
+- **Seed data como fallback**: cuando el scraper es bloqueado, se devuelven datos reales precargados en vez de error.
+- **Alias normalization**: `cv_matcher.js` normaliza abreviaciones antes de comparar (`js → JavaScript`).
+- **Fix DNS global**: tanto Node (`dns.setServers`) como Python (`dns.resolver.default_resolver`) fuerzan Google DNS al arranque.
+
+## Patrones prohibidos
+
+- No usar `require()` en Node (rompe ESM).
+- No guardar estado de conversación en variables globales (se perdería al reiniciar).
+- No hacer `import *` en Python (dificulta rastrear dependencias).
+- No usar emojis en `print()` de Python sin `chcp 65001` o `PYTHONIOENCODING=utf-8` (rompe en Windows cp1252).
+- No llamar a `bot.launch()` desde más de un proceso (conflicto de polling).
+
+## Logging
+
+- **Node**: usar `logger` de `src/logger.js` (pino), nunca `console.log`/`console.error`.
+  Formato `logger.info({ campo: valor }, 'mensaje')` — el objeto va primero. Pretty en
+  desarrollo, JSON en producción. Excepción: `config.js` usa `console.error` a propósito
+  (fallo de arranque antes de que exista el logger).
+- **Python**: `print()` con prefijo `[SCRAPE]`, `[SCRAPER]`, etc. (sin emojis nuevos).
+
+## Rate limiting
+
+- Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
+  `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
+
+## Comunicación entre servicios
+
+- Todas las llamadas Node→Python pasan por `src/bot/scraper_client.js` (URL base +
+  header `X-API-Key`). No hagas `fetch` directo al scraper desde los comandos.
+- El scraper valida `X-API-Key` contra `API_SECRET_KEY` (si está configurada).
+  Vacía = auth off (solo local). `/health` queda siempre abierto.
+
+## Validación de salida de LLM
+
+- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
+  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
+
+## Tests
+
+[PENDIENTE: no hay tests automatizados. Si se añaden, usar Jest para Node y pytest para Python. Lint con `npm run lint` y `ruff check scraper`.]
+
+## Commits
+
+[PENDIENTE: no hay git en el directorio del proyecto. Si se inicializa, usar Conventional Commits: `feat:`, `fix:`, `chore:`.]
+````
+
+## File: package.json
+````json
+{
+  "name": "asistente-carrera-bot",
+  "version": "0.1.0",
+  "description": "Bot de Telegram que hace onboarding inteligente, diagnostico de brechas y plan de estudios personalizado para estudiantes.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first src/index.js\" \"py -X utf8 scraper/app.py\"",
+    "bot": "node --dns-result-order=ipv4first src/index.js",
+    "scraper": "py scraper/app.py",
+    "dev": "concurrently --names \"BOT,SCRAPER\" --prefix-colors \"cyan,yellow\" \"node --dns-result-order=ipv4first --watch src/index.js\" \"py scraper/app.py\"",
+    "lint": "eslint src",
+    "format": "prettier --write \"**/*.{js,json,md}\"",
+    "format:check": "prettier --check \"**/*.{js,json,md}\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@google/genai": "^2.10.0",
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.5.1",
+    "node-cron": "^4.5.0",
+    "pdfkit": "^0.19.1",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
+    "telegraf": "^4.16.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "concurrently": "^10.0.3",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.4"
+  }
+}
+````
+
+## File: scraper/app.py
+````python
+import atexit
+import os
+from datetime import datetime, timezone, timedelta
+from flask import Flask, jsonify, request
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
+
+from scraper import scrape_occ
+from models import save_ranking, get_ranking, list_especialidades
+from becas import filtrar_becas
+
+load_dotenv()
+
+app = Flask(__name__)
+
+# Secreto compartido con el bot Node. Si está vacío, la auth queda desactivada
+# (cómodo en local); en producción ponlo en ambos .env.
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
+
+
+@app.before_request
+def _check_api_key():
+    """Valida el header X-API-Key en todos los endpoints menos /health.
+
+    Solo se exige si API_SECRET_KEY está configurada; así local sigue simple.
+    """
+    if not API_SECRET_KEY or request.path == "/health":
+        return None
+    if request.headers.get("X-API-Key", "") != API_SECRET_KEY:
+        return jsonify({"error": "No autorizado"}), 401
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.get("/skills")
+def skills():
+    """GET /skills?especialidad=datos-ia&limit=5"""
+    especialidad = request.args.get("especialidad", "").strip()
+    limit = min(int(request.args.get("limit", 5)), 20)
+
+    if not especialidad:
+        return jsonify({"error": "Falta el parámetro 'especialidad'"}), 400
+
+    data = get_ranking(especialidad, limit)
+    if not data:
+        return jsonify({
+            "error": f"No hay datos para '{especialidad}'. Llama a POST /scrape primero."
+        }), 404
+
+    return jsonify(data)
+
+
+# Tiempo que se consideran "frescos" los datos antes de re-scrapear
+CACHE_HOURS = 24
+
+
+def _is_fresh(updated_at_iso: str) -> bool:
+    """True si la fecha ISO es de hace menos de CACHE_HOURS."""
+    try:
+        updated = datetime.fromisoformat(updated_at_iso)
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - updated < timedelta(hours=CACHE_HOURS)
+    except (ValueError, TypeError):
+        return False
+
+
+@app.post("/scrape")
+def scrape():
+    """POST /scrape  body: { "especialidad": "datos-ia" }
+
+    Si ya hay datos de hace menos de 24h, no vuelve a scrapear (responde cached).
+    """
+    body = request.get_json(silent=True) or {}
+    especialidad = body.get("especialidad", "").strip()
+
+    if not especialidad:
+        return jsonify({"error": "Falta 'especialidad' en el body"}), 400
+
+    # Cache hit: datos frescos en MongoDB, evita el scrape (responde en <1s)
+    existing = get_ranking(especialidad, limit=1)
+    if existing and _is_fresh(existing.get("updatedAt")):
+        print(f"[SCRAPE] Cache hit para '{especialidad}' (datos de <{CACHE_HOURS}h)")
+        return jsonify({"ok": True, "especialidad": especialidad, "cached": True})
+
+    print(f"[SCRAPE] Scrapeando para: {especialidad}")
+    data = scrape_occ(especialidad)
+    save_ranking(especialidad, data)
+    print(f"[SCRAPE] Guardado: {len(data['skills'])} skills para '{especialidad}'")
+
+    return jsonify({
+        "ok": True,
+        "especialidad": especialidad,
+        "cached": False,
+        "skills_found": len(data["skills"]),
+    })
+
+
+@app.get("/especialidades")
+def especialidades():
+    return jsonify({"especialidades": list_especialidades()})
+
+
+@app.get("/becas")
+def becas():
+    """GET /becas?especialidad=datos-ia&carrera=sistemas&limit=5
+
+    Filtra y ordena por relevancia para la especialidad; carrera es secundaria.
+    """
+    especialidad = request.args.get("especialidad", "").strip()
+    carrera = request.args.get("carrera", "").strip()
+    limit = min(int(request.args.get("limit", 5)), 10)
+    if not especialidad and not carrera:
+        return jsonify({"error": "Falta 'especialidad' o 'carrera'"}), 400
+    resultado = filtrar_becas(especialidad, carrera, limit)
+    return jsonify({"becas": resultado, "total": len(resultado)})
+
+
+# ---------------------------------------------------------------------------
+# Cron semanal (cada lunes a las 6 AM) — re-scrapea todas las especialidades
+# ---------------------------------------------------------------------------
+
+def _weekly_scrape():
+    todas = list_especialidades()
+    print(f"[CRON] Semanal: {len(todas)} especialidades a scrapear")
+    for esp in todas:
+        try:
+            data = scrape_occ(esp)
+            save_ranking(esp, data)
+            print(f"  [CRON] OK {esp}")
+        except Exception as e:
+            print(f"  [CRON] ERROR {esp}: {e}")
+
+
+_scheduler = BackgroundScheduler()
+_scheduler.add_job(_weekly_scrape, "cron", day_of_week="mon", hour=6, minute=0)
+_scheduler.start()
+atexit.register(lambda: _scheduler.shutdown())
+
+
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    port = int(os.getenv("SCRAPER_PORT", 5001))
+    print(f"[SCRAPER] Iniciando en http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
+````
+
+## File: scraper/scraper.py
+````python
+import time
+import json
+import random
+import requests
+from bs4 import BeautifulSoup
+from extractor import extract_skills, rank_skills
+
+
+def extract_jsonld_jobs(soup) -> list[str]:
+    """Extrae descripciones de vacantes desde <script type="application/ld+json">.
+
+    Muchos portales de empleo (OCC incluido) inyectan los datos de cada vacante
+    como JSON-LD estructurado (schema.org/JobPosting). Leer eso es mucho más
+    estable que depender de clases CSS de React, que cambian con cada rediseño.
+    """
+    textos = []
+    for tag in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(tag.string or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        # El JSON-LD puede venir como objeto, lista o dentro de un @graph
+        if isinstance(data, list):
+            candidatos = data
+        elif isinstance(data, dict):
+            candidatos = data.get("@graph", [data])
+        else:
+            candidatos = []
+
+        for item in candidatos:
+            if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                titulo = item.get("title", "") or ""
+                desc = item.get("description", "") or ""
+                if titulo or desc:
+                    textos.append(f"{titulo} {desc}")
+    return textos
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.occ.com.mx/",
+}
+
+# Especialidad (la "capa de precisión") -> query de OCC mucho más específico.
+# Las keys coinciden EXACTAMENTE con src/bot/especialidades.js (contrato compartido).
+# Cada especialidad agrupa VARIOS títulos de OCC: el mercado real publica la
+# misma especialidad bajo nombres distintos. Buscar solo un slug dejaba fuera la
+# mayor parte de las vacantes. scrape_occ itera sobre todos y combina resultados.
+ESPECIALIDAD_MAP = {
+    "desarrollo-web": ["desarrollador-web", "desarrollador-frontend", "desarrollador-full-stack"],
+    "datos-ia": ["data-scientist", "analista-de-datos", "data-engineer"],
+    "ciberseguridad": ["ingeniero-de-ciberseguridad", "analista-de-seguridad", "pentester"],
+    "devops-cloud": ["ingeniero-devops", "ingeniero-cloud", "site-reliability-engineer"],
+    "redes": ["administrador-de-redes", "ingeniero-de-redes", "soporte-de-infraestructura"],
+}
+
+# Datos reales del mercado tech mexicano (fuente: OCC/LinkedIn 2024-2025), uno
+# por especialidad. Es lo que hace que el bot dé consejos específicos aunque OCC
+# bloquee el scraper.
+SEED_DATA = {
+    "desarrollo-web": [
+        {"skill": "JavaScript", "count": 88, "pct": 88},
+        {"skill": "React",      "count": 76, "pct": 76},
+        {"skill": "HTML/CSS",   "count": 72, "pct": 72},
+        {"skill": "Node.js",    "count": 68, "pct": 68},
+        {"skill": "Git",        "count": 65, "pct": 65},
+        {"skill": "TypeScript", "count": 58, "pct": 58},
+        {"skill": "SQL",        "count": 55, "pct": 55},
+        {"skill": "MongoDB",    "count": 42, "pct": 42},
+        {"skill": "Next.js",    "count": 40, "pct": 40},
+        {"skill": "inglés",     "count": 70, "pct": 70},
+    ],
+    "datos-ia": [
+        {"skill": "Python",           "count": 92, "pct": 92},
+        {"skill": "SQL",              "count": 85, "pct": 85},
+        {"skill": "Pandas",           "count": 72, "pct": 72},
+        {"skill": "Machine Learning", "count": 70, "pct": 70},
+        {"skill": "Power BI",         "count": 65, "pct": 65},
+        {"skill": "NumPy",            "count": 60, "pct": 60},
+        {"skill": "Scikit-learn",     "count": 52, "pct": 52},
+        {"skill": "TensorFlow",       "count": 48, "pct": 48},
+        {"skill": "Tableau",          "count": 45, "pct": 45},
+        {"skill": "inglés",           "count": 80, "pct": 80},
+    ],
+    "ciberseguridad": [
+        {"skill": "Linux",     "count": 88, "pct": 88},
+        {"skill": "inglés",    "count": 85, "pct": 85},
+        {"skill": "Bash",      "count": 78, "pct": 78},
+        {"skill": "Python",    "count": 75, "pct": 75},
+        {"skill": "Redes",     "count": 70, "pct": 70},
+        {"skill": "AWS",       "count": 60, "pct": 60},
+        {"skill": "Git",       "count": 55, "pct": 55},
+        {"skill": "Docker",    "count": 52, "pct": 52},
+        {"skill": "SQL",       "count": 50, "pct": 50},
+        {"skill": "Wireshark", "count": 48, "pct": 48},
+    ],
+    "devops-cloud": [
+        {"skill": "Docker",     "count": 85, "pct": 85},
+        {"skill": "AWS",        "count": 78, "pct": 78},
+        {"skill": "Linux",      "count": 75, "pct": 75},
+        {"skill": "Git",        "count": 72, "pct": 72},
+        {"skill": "Kubernetes", "count": 70, "pct": 70},
+        {"skill": "Bash",       "count": 68, "pct": 68},
+        {"skill": "CI/CD",      "count": 65, "pct": 65},
+        {"skill": "Terraform",  "count": 58, "pct": 58},
+        {"skill": "Python",     "count": 55, "pct": 55},
+        {"skill": "Azure",      "count": 50, "pct": 50},
+    ],
+    "redes": [
+        {"skill": "Redes",   "count": 85, "pct": 85},
+        {"skill": "Cisco",   "count": 80, "pct": 80},
+        {"skill": "Linux",   "count": 75, "pct": 75},
+        {"skill": "inglés",  "count": 68, "pct": 68},
+        {"skill": "Bash",    "count": 65, "pct": 65},
+        {"skill": "AWS",     "count": 55, "pct": 55},
+        {"skill": "VPN",     "count": 52, "pct": 52},
+        {"skill": "Azure",   "count": 50, "pct": 50},
+        {"skill": "Python",  "count": 48, "pct": 48},
+        {"skill": "Docker",  "count": 45, "pct": 45},
+    ],
+}
+
+# Fallback generico si la especialidad no tiene seed especifico
+DEFAULT_SEED = SEED_DATA["desarrollo-web"]
+
+
+def especialidad_to_occ_queries(especialidad: str) -> list[str]:
+    """Mapea una especialidad (key kebab-case) a sus títulos de OCC."""
+    return ESPECIALIDAD_MAP.get((especialidad or "").lower().strip(), ["desarrollador-web"])
+
+
+def _scrape_query(session, query: str, max_pages: int) -> tuple[list, int, bool]:
+    """Scrapea un solo título de OCC. Devuelve (skill_lists, jobs, blocked)."""
+    skill_lists = []
+    jobs = 0
+    print(f"  Buscando OCC: '{query}' ({max_pages} páginas)")
+
+    for page in range(1, max_pages + 1):
+        url = f"https://www.occ.com.mx/empleos/de-{query}/?page={page}"
+        try:
+            resp = session.get(url, headers=HEADERS, timeout=15)
+
+            # OCC devuelve 403 o redirige a captcha cuando bloquea
+            if resp.status_code in (403, 429):
+                print(f"    ⚠️  OCC bloqueó la petición (HTTP {resp.status_code})")
+                return skill_lists, jobs, True
+
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Detecta pagina de captcha/bloqueo
+            page_text = soup.get_text(" ", strip=True).lower()
+            if "captcha" in page_text or "acceso denegado" in page_text or len(page_text) < 200:
+                print("    ⚠️  OCC devolvió captcha o página vacía")
+                return skill_lists, jobs, True
+
+            # 1) Preferido: metadata estructurada JSON-LD (estable a cambios de DOM)
+            textos = extract_jsonld_jobs(soup)
+            fuente_pagina = "json-ld"
+
+            # 2) Fallback: selectores CSS de OCC en orden de especificidad
+            if not textos:
+                blocks = (
+                    soup.select("article[data-testid]")           # OCC nuevo
+                    or soup.select("article")                      # generico
+                    or soup.select("[class*='VacancyCard']")       # componente React
+                    or soup.select("[class*='vacancy-card']")
+                    or soup.select("[class*='job-card']")
+                    or soup.select("li[class*='vacancy']")
+                    or soup.select("li[class*='job']")
+                    or ([soup.body] if soup.body else [])          # ultimo recurso
+                )
+                textos = [b.get_text(" ", strip=True) for b in blocks]
+                fuente_pagina = "css"
+
+            hits = 0
+            for text in textos:
+                if len(text) < 40:
+                    continue
+                skills = extract_skills(text)
+                if skills:
+                    skill_lists.append(skills)
+                    jobs += 1
+                    hits += 1
+
+            print(f"    Pág {page} ({fuente_pagina}): {hits} con skills | acum query: {jobs}")
+
+        except requests.HTTPError as e:
+            print(f"    HTTP {e.response.status_code} en pág {page}")
+            if e.response.status_code in (403, 429):
+                return skill_lists, jobs, True
+        except Exception as e:
+            print(f"    Error pág {page}: {e}")
+
+        time.sleep(random.uniform(2, 4))
+
+    return skill_lists, jobs, False
+
+
+def scrape_occ(especialidad: str, max_pages: int = 2) -> dict:
+    queries = especialidad_to_occ_queries(especialidad)
+    all_skill_lists = []
+    total_jobs = 0
+    blocked = False
+
+    session = requests.Session()
+    # Visita el home primero para obtener cookies (reduce bloqueos)
+    try:
+        session.get("https://www.occ.com.mx/", headers=HEADERS, timeout=10)
+        time.sleep(1.5)
+    except Exception:
+        pass
+
+    # Itera sobre todos los títulos de la especialidad y combina los resultados.
+    # Menos páginas por query (2) para no disparar el tiempo total ni el bloqueo.
+    for query in queries:
+        skill_lists, jobs, q_blocked = _scrape_query(session, query, max_pages)
+        all_skill_lists.extend(skill_lists)
+        total_jobs += jobs
+        if q_blocked:
+            blocked = True
+            break  # OCC bloquea por IP: no tiene sentido seguir con más queries
+
+    # Si OCC bloqueó o no extrajo nada, usa datos del mercado pre-cargados
+    if blocked or not all_skill_lists:
+        seed = SEED_DATA.get((especialidad or "").lower().strip(), DEFAULT_SEED)
+        print(f"  [SCRAPE] Usando datos pre-cargados para '{especialidad}' ({len(seed)} skills)")
+        return {
+            "skills": seed,
+            "total_jobs": 100,  # estimado basado en OCC 2024-2025
+            "query": ", ".join(queries),
+            "source": "seed",
+        }
+
+    return {
+        "skills": rank_skills(all_skill_lists),
+        "total_jobs": total_jobs,
+        "query": ", ".join(queries),
+        "source": "live",
+    }
+````
+
+## File: src/bot/cv_generator.js
+````javascript
+import PDFDocument from 'pdfkit';
+import { z } from 'zod';
+import { config } from '../config.js';
+import { logger } from '../logger.js';
+import { STATES } from './states.js';
+import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+// Esquema esperado de la respuesta de Groq para el CV. Tolera campos extra y
+// descripción ausente; rechaza cuando faltan los obligatorios o cambian de tipo.
+const CV_SCHEMA = z.object({
+  resumen: z.string().min(1),
+  habilidades: z.record(z.string(), z.array(z.string())),
+  proyectos: z.array(
+    z.object({
+      titulo: z.string().min(1),
+      descripcion: z.string().default(''),
+    })
+  ),
+});
+
+/**
+ * Generador de CV estilo Harvard.
+ *
+ * Responsabilidad separada de cv_matcher.js: el matcher COMPARA skills contra el
+ * mercado; este arma el DOCUMENTO. El comando /cv corre un mini-flujo de 4
+ * preguntas (estados CV_*) y al final estructura el contenido con Groq y lo
+ * renderiza a PDF con PDFKit (Times-Roman, una columna, estilo Harvard).
+ */
+
+// ---------------------------------------------------------------------------
+// Mini-flujo de preguntas (estados CV_*). El último paso marca generateCV.
+// ---------------------------------------------------------------------------
+
+const SKIP = new Set(['0', '-', 'no', 'ninguno', 'ninguna', 'saltar', 'skip']);
+
+function splitLineas(text) {
+  return text
+    .split(/[\n;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export const cvSteps = {
+  [STATES.CV_ASK_PROYECTOS]: {
+    prompt: () =>
+      '📄 Vamos a armar tu CV estilo Harvard.\n\n' +
+      '*1/4* — ¿Qué proyectos o experiencia tienes? (aunque sean pequeños)\n' +
+      'Uno por línea o separados por *;*. Escribe *0* para saltar.\n\n' +
+      'Ej: App de tareas en React; Servicio social en sistemas de la escuela',
+    handle: (text, profile) => {
+      const limpio = text.trim().toLowerCase();
+      profile.proyectos = SKIP.has(limpio) ? [] : splitLineas(text);
+      return { ok: true, next: STATES.CV_ASK_LOGROS };
+    },
+  },
+
+  [STATES.CV_ASK_LOGROS]: {
+    prompt: () =>
+      '*2/4* — ¿Tienes logros o reconocimientos? (becas, concursos, certificados)\n' +
+      'Uno por línea o separados por *;*. Escribe *0* para saltar.',
+    handle: (text, profile) => {
+      const limpio = text.trim().toLowerCase();
+      profile.logros = SKIP.has(limpio) ? [] : splitLineas(text);
+      return { ok: true, next: STATES.CV_ASK_LINKS };
+    },
+  },
+
+  [STATES.CV_ASK_LINKS]: {
+    prompt: () =>
+      '*3/4* — ¿Tienes GitHub o LinkedIn? Pega los links (o *0* para saltar).\n\n' +
+      'Ej: github.com/tuusuario, linkedin.com/in/tuusuario',
+    handle: (text, profile) => {
+      const limpio = text.trim().toLowerCase();
+      if (!SKIP.has(limpio)) {
+        const { github, linkedin } = parseLinks(text);
+        if (github) profile.github = github;
+        if (linkedin) profile.linkedin = linkedin;
+      }
+      return { ok: true, next: STATES.CV_ASK_EMAIL };
+    },
+  },
+
+  [STATES.CV_ASK_EMAIL]: {
+    prompt: () =>
+      '*4/4* — ¿Cuál es tu email de contacto? (o *0* para saltar)',
+    handle: (text, profile) => {
+      const limpio = text.trim();
+      if (SKIP.has(limpio.toLowerCase())) {
+        return { ok: true, generateCV: true };
+      }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(limpio)) {
+        return { ok: false, error: 'Ese email no se ve válido. Escríbelo bien o *0* para saltar 📧' };
+      }
+      profile.email = limpio;
+      return { ok: true, generateCV: true };
+    },
+  },
+};
+
+/**
+ * Extrae URLs de GitHub y LinkedIn de texto libre.
+ */
+function parseLinks(text) {
+  const result = {};
+  for (const token of text.split(/[\s,]+/)) {
+    const t = token.trim().replace(/^https?:\/\//, '');
+    if (/github\.com/i.test(t)) result.github = t;
+    else if (/linkedin\.com/i.test(t)) result.linkedin = t;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Estructuración del contenido (Groq + fallback determinista)
+// ---------------------------------------------------------------------------
+
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+// Categorización de skills para el fallback (cuando Groq no responde)
+const CATEGORIAS = {
+  Lenguajes: ['javascript', 'typescript', 'python', 'java', 'c#', 'c++', 'php', 'go', 'ruby', 'kotlin', 'swift', 'rust', 'bash', 'r'],
+  Frameworks: ['react', 'angular', 'vue', 'next.js', 'node.js', 'express', 'django', 'flask', 'fastapi', 'spring boot', 'laravel', '.net', 'nestjs', 'tensorflow', 'pytorch', 'pandas', 'numpy', 'scikit-learn'],
+  'Bases de datos': ['sql', 'mysql', 'postgresql', 'mongodb', 'redis', 'oracle', 'sql server'],
+  'Cloud y herramientas': ['aws', 'azure', 'gcp', 'docker', 'kubernetes', 'git', 'github', 'terraform', 'ci/cd', 'jenkins', 'linux', 'power bi', 'tableau', 'cisco', 'wireshark'],
+};
+
+/**
+ * Categoriza skills con el mapa local (fallback sin IA).
+ */
+function categorizarLocal(habilidades) {
+  const cats = { Lenguajes: [], Frameworks: [], 'Bases de datos': [], 'Cloud y herramientas': [], Otras: [] };
+  for (const skill of habilidades) {
+    const lower = skill.toLowerCase();
+    if (/ingl|franc|alem|portug|español/.test(lower)) continue; // idiomas van aparte
+    let ubicada = false;
+    for (const [cat, lista] of Object.entries(CATEGORIAS)) {
+      if (lista.includes(lower)) {
+        cats[cat].push(skill);
+        ubicada = true;
+        break;
+      }
+    }
+    if (!ubicada) cats.Otras.push(skill);
+  }
+  // Quita categorías vacías
+  return Object.fromEntries(Object.entries(cats).filter(([, v]) => v.length));
+}
+
+/**
+ * Estructura los datos del perfil en secciones de CV. Intenta con Groq (resumen
+ * profesional + categorización + pulido de proyectos); si falla, usa un armado
+ * determinista para que /cv NUNCA quede sin entregar.
+ */
+export async function structureCV(profile) {
+  const especialidad = profile.especialidad
+    ? labelDe(profile.especialidad, ESPECIALIDADES)
+    : 'desarrollo de software';
+  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'estudiante';
+
+  const fallback = () => ({
+    resumen:
+      `Estudiante de ${profile.carrera} enfocado en ${especialidad}. ` +
+      `Busca aplicar y seguir desarrollando habilidades en ${profile.habilidades.slice(0, 3).join(', ')}.`,
+    habilidades: categorizarLocal(profile.habilidades),
+    proyectos: (profile.proyectos || []).map((p) => ({ titulo: p, descripcion: '' })),
+  });
+
+  if (!config.groqKey) return fallback();
+
+  const prompt = `Eres un experto en CVs estilo Harvard para estudiantes de tecnología en México.
+Devuelve SOLO un objeto JSON válido (sin texto antes ni después) con esta forma exacta:
+{
+  "resumen": "2 oraciones en español, perfil profesional enfocado en ${especialidad}, nivel ${nivel}",
+  "habilidades": { "Lenguajes": [], "Frameworks": [], "Bases de datos": [], "Cloud y herramientas": [], "Otras": [] },
+  "proyectos": [ { "titulo": "...", "descripcion": "1 oración con verbos de acción y resultado" } ]
+}
+
+Datos del estudiante:
+- Carrera: ${profile.carrera}, semestre ${profile.semestre}
+- Especialidad: ${especialidad}
+- Habilidades: ${profile.habilidades.join(', ')}
+- Proyectos/experiencia (texto crudo): ${(profile.proyectos || []).join(' | ') || 'ninguno'}
+
+Reglas: categoriza cada habilidad en su grupo (omite grupos vacíos). Para proyectos, pule el texto crudo a título + descripción profesional. Si no hay proyectos, devuelve [].`;
+
+  try {
+    const res = await fetch(GROQ_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.groqKey}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.5,
+        max_tokens: 1200,
+        response_format: { type: 'json_object' },
+      }),
+    });
+    if (!res.ok) throw new Error(`Groq ${res.status}`);
+    const data = await res.json();
+    const raw = data.choices?.[0]?.message?.content ?? '';
+    const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+
+    // Valida la forma con Zod: si Groq cambia el formato, esto lo detecta y
+    // caemos al fallback en vez de meter basura al PDF.
+    const result = CV_SCHEMA.safeParse(json);
+    if (!result.success) {
+      throw new Error(`Forma inválida: ${result.error.issues[0]?.message}`);
+    }
+    const parsed = result.data;
+
+    // Quita categorías de skills vacías y, si todo quedó vacío, usa el fallback
+    const fb = fallback();
+    const habilidades = Object.fromEntries(
+      Object.entries(parsed.habilidades).filter(([, v]) => v.length)
+    );
+    return {
+      resumen: parsed.resumen,
+      habilidades: Object.keys(habilidades).length ? habilidades : fb.habilidades,
+      proyectos: parsed.proyectos.length ? parsed.proyectos : fb.proyectos,
+    };
+  } catch (err) {
+    logger.warn({ err: err.message, telegramId: profile.telegramId }, 'structureCV cayó a fallback');
+    return fallback();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Renderizado PDF (estilo Harvard)
+// ---------------------------------------------------------------------------
+
+function idiomasDe(habilidades) {
+  const idiomas = ['Español: Nativo'];
+  for (const h of habilidades) {
+    if (/ingl[eé]s|franc[eé]s|alem[aá]n|portugu[eé]s/i.test(h)) {
+      idiomas.push(h.charAt(0).toUpperCase() + h.slice(1));
+    }
+  }
+  return idiomas;
+}
+
+function seccion(doc, titulo) {
+  doc.moveDown(0.6);
+  doc.font('Times-Bold').fontSize(11.5).fillColor('#000').text(titulo.toUpperCase());
+  const y = doc.y + 1.5;
+  doc
+    .moveTo(doc.page.margins.left, y)
+    .lineTo(doc.page.width - doc.page.margins.right, y)
+    .lineWidth(0.7)
+    .stroke();
+  doc.moveDown(0.35);
+}
+
+/**
+ * Construye el PDF y lo devuelve como Buffer.
+ * @returns {Promise<Buffer>}
+ */
+export function buildPDF(profile, structured) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({
+      size: 'LETTER',
+      margins: { top: 50, bottom: 50, left: 60, right: 60 },
+    });
+    const chunks = [];
+    doc.on('data', (c) => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    // --- Encabezado: nombre centrado + contacto ---
+    doc.font('Times-Bold').fontSize(20).text(profile.nombre.toUpperCase(), { align: 'center' });
+    const contacto = [profile.email, profile.github, profile.linkedin].filter(Boolean).join('   |   ');
+    if (contacto) {
+      doc.font('Times-Roman').fontSize(10).text(contacto, { align: 'center' });
+    }
+    const yLine = doc.y + 3;
+    doc
+      .moveTo(doc.page.margins.left, yLine)
+      .lineTo(doc.page.width - doc.page.margins.right, yLine)
+      .lineWidth(1.2)
+      .stroke();
+    doc.moveDown(0.5);
+
+    // --- Perfil ---
+    if (structured.resumen) {
+      seccion(doc, 'Perfil Profesional');
+      doc.font('Times-Roman').fontSize(10.5).text(structured.resumen, { align: 'justify' });
+    }
+
+    // --- Educación (primero: es lo más fuerte de un estudiante) ---
+    seccion(doc, 'Educación');
+    doc.font('Times-Bold').fontSize(11).text(profile.carrera);
+    let sub = `Semestre ${profile.semestre}`;
+    if (profile.promedio >= 8) sub += `   ·   Promedio: ${profile.promedio}`;
+    doc.font('Times-Roman').fontSize(10).text(sub);
+
+    // --- Habilidades técnicas (categorizadas) ---
+    const cats = structured.habilidades || {};
+    if (Object.keys(cats).length) {
+      seccion(doc, 'Habilidades Técnicas');
+      for (const [cat, items] of Object.entries(cats)) {
+        doc.font('Times-Bold').fontSize(10).text(`${cat}: `, { continued: true });
+        doc.font('Times-Roman').text(items.join(', '));
+      }
+    }
+
+    // --- Proyectos ---
+    if (structured.proyectos?.length) {
+      seccion(doc, 'Proyectos y Experiencia');
+      for (const p of structured.proyectos) {
+        doc.font('Times-Bold').fontSize(10.5).text(p.titulo || p);
+        if (p.descripcion) {
+          doc.font('Times-Roman').fontSize(10).text(p.descripcion, { indent: 12 });
+        }
+        doc.moveDown(0.2);
+      }
+    }
+
+    // --- Logros ---
+    if (profile.logros?.length) {
+      seccion(doc, 'Logros y Reconocimientos');
+      for (const l of profile.logros) {
+        doc.font('Times-Roman').fontSize(10).text(`•  ${l}`);
+      }
+    }
+
+    // --- Idiomas ---
+    seccion(doc, 'Idiomas');
+    doc.font('Times-Roman').fontSize(10).text(idiomasDe(profile.habilidades).join('   ·   '));
+
+    doc.end();
+  });
+}
+
+/**
+ * Orquesta todo: estructura el contenido y construye el PDF.
+ * @returns {Promise<{buffer: Buffer, filename: string}>}
+ */
+export async function generarCV(profile) {
+  const structured = await structureCV(profile);
+  const buffer = await buildPDF(profile, structured);
+  const slug = (profile.nombre || 'CV').replace(/\s+/g, '_');
+  return { buffer, filename: `CV_${slug}.pdf` };
+}
+````
+
 ## File: src/bot/scheduler.js
 ````javascript
 import cron from 'node-cron';
@@ -2698,46 +2882,6 @@ export function startScheduler(bot) {
 }
 ````
 
-## File: src/bot/states.js
-````javascript
-/**
- * Estados de la maquina de conversacion (el "formulario invisible").
- *
- * Cada mensaje del usuario hace avanzar al siguiente estado. El estado actual
- * vive en `profile.conversationState` en MongoDB.
- *
- * Flujo del onboarding:
- *   NEW -> ASK_NOMBRE -> ASK_CARRERA -> ASK_SEMESTRE -> ASK_PROMEDIO
- *       -> ASK_HABILIDADES -> ASK_HORARIO -> DONE
- */
-export const STATES = {
-  NEW: 'NEW',                     // recien creado, aun no empieza
-  ASK_NOMBRE: 'ASK_NOMBRE',
-  ASK_CARRERA: 'ASK_CARRERA',
-  ASK_ESPECIALIDAD: 'ASK_ESPECIALIDAD', // hacia donde va (dirige todo el bot)
-  ASK_OBJETIVO: 'ASK_OBJETIVO',         // tipo de empresa (opcional)
-  ASK_SEMESTRE: 'ASK_SEMESTRE',
-  ASK_PROMEDIO: 'ASK_PROMEDIO',
-  ASK_HABILIDADES: 'ASK_HABILIDADES',
-  ASK_NIVEL: 'ASK_NIVEL',               // nivel autopercibido (3 puntos)
-  ASK_HORARIO: 'ASK_HORARIO',
-  DONE: 'DONE',                   // onboarding terminado
-
-  // Edicion puntual (post-onboarding): editan un solo campo y vuelven a DONE
-  // sin re-preguntar todo. Los activan los comandos /habilidades, /horario, /especialidad.
-  EDIT_HABILIDADES: 'EDIT_HABILIDADES',
-  EDIT_HORARIO: 'EDIT_HORARIO',
-  EDIT_ESPECIALIDAD: 'EDIT_ESPECIALIDAD',
-
-  // Mini-flujo del comando /cv (independiente del onboarding). Al terminar
-  // genera el PDF en vez de volver al menú.
-  CV_ASK_PROYECTOS: 'CV_ASK_PROYECTOS',
-  CV_ASK_LOGROS: 'CV_ASK_LOGROS',
-  CV_ASK_LINKS: 'CV_ASK_LINKS',
-  CV_ASK_EMAIL: 'CV_ASK_EMAIL',
-};
-````
-
 ## File: src/config.js
 ````javascript
 import 'dotenv/config';
@@ -2767,32 +2911,6 @@ export const config = {
   // (cómodo en local); en producción ponlo en ambos .env.
   apiSecret: process.env.API_SECRET_KEY || '',
 };
-````
-
-## File: src/db.js
-````javascript
-import dns from 'dns';
-import mongoose from 'mongoose';
-import { config } from './config.js';
-import { logger } from './logger.js';
-
-// Fuerza a Node.js a usar Google DNS, por si el DNS local falla con SRV records
-dns.setServers(['8.8.8.8', '8.8.4.4']);
-
-/**
- * Conecta a MongoDB Atlas. Mongoose mantiene un pool de conexiones,
- * asi que se llama una sola vez al arrancar.
- */
-export async function connectDB() {
-  mongoose.set('strictQuery', true);
-  await mongoose.connect(config.mongoUri);
-  logger.info('✅ Conectado a MongoDB');
-}
-
-export async function disconnectDB() {
-  await mongoose.disconnect();
-  logger.info('🔌 Desconectado de MongoDB');
-}
 ````
 
 ## File: src/index.js
@@ -3227,100 +3345,4 @@ process.once('SIGTERM', async () => {
 });
 
 main();
-````
-
-## File: src/logger.js
-````javascript
-import pino from 'pino';
-
-/**
- * Logger estructurado para toda la app.
- *
- * - En desarrollo: salida bonita y coloreada (pino-pretty) para leer en consola.
- * - En producción: JSON puro, que Railway/Logtail pueden indexar y filtrar.
- *
- * Nivel configurable con LOG_LEVEL (default: info).
- */
-const isDev = (process.env.NODE_ENV || 'development') !== 'production';
-
-export const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  transport: isDev
-    ? {
-        target: 'pino-pretty',
-        options: {
-          colorize: true,
-          translateTime: 'HH:MM:ss',
-          ignore: 'pid,hostname',
-        },
-      }
-    : undefined,
-});
-````
-
-## File: src/models/profile.js
-````javascript
-import mongoose from 'mongoose';
-import { STATES } from '../bot/states.js';
-
-/**
- * Perfil del estudiante.
- *
- * Guarda tanto los datos del onboarding como el estado de la conversacion
- * (`conversationState`). Persistir el estado en la base — en vez de en memoria —
- * hace que el bot sobreviva reinicios/redeploys en Railway sin perder el hilo.
- */
-const profileSchema = new mongoose.Schema(
-  {
-    // Identidad de Telegram (clave unica del usuario)
-    telegramId: { type: Number, required: true, unique: true, index: true },
-    username: { type: String },
-
-    // Datos del onboarding
-    nombre: { type: String },
-    carrera: { type: String },
-
-    // Capa de precisión: especialidad dirige mercado/CV/plan/becas.
-    // `especialidad` es requerida tras el onboarding; los perfiles viejos no la
-    // tienen y se migran en caliente (ver requireEspecialidad en index.js).
-    especialidad: { type: String },
-    objetivo: { type: String },   // tipo de empresa (opcional)
-    nivel: { type: String },      // autopercibido: principiante|intermedio|avanzado
-
-    semestre: { type: Number },
-    promedio: { type: Number },
-    habilidades: { type: [String], default: [] },
-
-    // Datos extra para el CV (los pregunta /cv, no el onboarding)
-    email: { type: String },
-    github: { type: String },
-    linkedin: { type: String },
-    proyectos: { type: [String], default: [] },
-    logros: { type: [String], default: [] },
-
-    // Horario disponible por dia (ej. { lunes: "19:00-21:00", sabado: "09:00-13:00" })
-    horario: { type: Map, of: String, default: {} },
-
-    // Maquina de estados de la conversacion
-    conversationState: {
-      type: String,
-      enum: Object.values(STATES),
-      default: STATES.NEW,
-    },
-
-    // true cuando termino el onboarding completo
-    onboardingCompleto: { type: Boolean, default: false },
-
-    // Historial de scores de compatibilidad CV vs mercado (Fase 3 y 6).
-    // Guarda contra qué especialidad se calculó: si cambias de especialidad,
-    // /progreso filtra para no comparar peras con manzanas.
-    cvScores: {
-      type: [{ score: Number, fecha: Date, especialidad: String }],
-      default: [],
-    },
-  },
-  { timestamps: true } // createdAt + updatedAt automaticos
-);
-
-export const Profile = mongoose.model('Profile', profileSchema);
 ````

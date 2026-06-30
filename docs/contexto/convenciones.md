@@ -10,7 +10,7 @@
 
 | Elemento | Convención | Ejemplo |
 |----------|-----------|---------|
-| Archivos Node | camelCase | `cv_matcher.js`, `onboarding.js` |
+| Archivos Node | lowercase / snake_case | `cv_matcher.js`, `scraper_client.js`, `onboarding.js` |
 | Archivos Python | snake_case | `scraper.py`, `becas.py` |
 | Funciones Node | camelCase | `matchSkills()`, `generatePlan()` |
 | Funciones Python | snake_case | `filtrar_becas()`, `rank_skills()` |
@@ -58,7 +58,8 @@
 ## Rate limiting
 
 - Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
-  `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
+  `/plan` 60s; `/mercado`, `/miCV`, `/comparar`, `/quiz`, `/entrevista` 30s; `/simular` 20s.
+  Map en memoria, se reinicia con el bot.
 
 ## Comunicación entre servicios
 
@@ -69,8 +70,9 @@
 
 ## Validación de salida de LLM
 
-- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
-  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
+- Todo JSON que devuelve Groq se valida con **Zod** antes de usarlo: `CV_SCHEMA`
+  (`cv_generator.js`), `QUIZ_SCHEMA` (`quiz.js`), `PREGUNTAS_SCHEMA`/`EVAL_SCHEMA`
+  (`entrevista.js`). Si no cumple el esquema, se cae al fallback o se reintenta.
 
 ## Tests
 
@@ -86,4 +88,8 @@
 
 ## Commits
 
-[PENDIENTE: no hay git en el directorio del proyecto. Si se inicializa, usar Conventional Commits: `feat:`, `fix:`, `chore:`.]
+- Repo en GitHub: https://github.com/crisagui2504/tutor (rama `main`).
+- Mensajes con un título corto en presente + cuerpo explicando el porqué; cada
+  commit cierra co-autoría con `Co-Authored-By: Claude ...`.
+- Antes de subir: `npm test`, `npm run lint`, y verificar que `.env` NO quede
+  staged (está en `.gitignore`; el repo es público).

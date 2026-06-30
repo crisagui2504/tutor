@@ -10,8 +10,11 @@
 | LLM | Groq API (Llama 3.3 70B) | nube, compatible con OpenAI |
 | Scheduler Node | node-cron | 4.x |
 | Scheduler Python | APScheduler | 3.10 |
-| Logging Node | pino + pino-pretty | 9.x |
-| PDF (CV) | pdfkit (JS puro, Times-Roman built-in) | 0.15.x |
+| Logging Node | pino + pino-pretty | 10.x |
+| PDF (CV) | pdfkit (JS puro, Times-Roman built-in) | 0.19.x |
+| Validación LLM | zod | 4.x |
+| Tests | Vitest (Node) + pytest (Python) | — |
+| Lint/format | ESLint + Prettier (Node), Ruff (Python) | — |
 
 ## Mapa de carpetas
 
@@ -28,7 +31,8 @@ asistente/
 │       ├── states.js      # Enum de estados de la FSM
 │       ├── especialidades.js # Taxonomía (especialidad/objetivo/nivel) — contrato con Python
 │       ├── onboarding.js  # Pasos del onboarding (prompt + handle)
-│       ├── cv_matcher.js  # COMPARA skills vs mercado (matchSkills, recordScore)
+│       ├── scraper_client.js # Cliente del scraper (URL base + auth X-API-Key)
+│       ├── cv_matcher.js  # COMPARA skills (matchSkills, recordScore, proyectarEscenarios)
 │       ├── cv_generator.js # ARMA el CV: mini-flujo /cv + Groq + PDF (PDFKit)
 │       ├── planner.js     # Llama a Groq API para generar el plan
 │       ├── quiz.js        # Quiz interactivo (Groq + Zod, estado en memoria)
@@ -37,16 +41,19 @@ asistente/
 │       ├── progreso.js    # Gráfica ASCII del historial de scores
 │       └── scheduler.js   # Crons: check-in semanal + re-score mensual
 ├── scraper/               # API Python (puerto 5001)
-│   ├── app.py             # Flask: /health /skills /scrape /careers /becas
-│   ├── scraper.py         # Scrape OCC → fallback a SEED_DATA
+│   ├── app.py             # Flask: /health /skills /scrape /becas /especialidades /metrics /dashboard
+│   ├── scraper.py         # Scrape OCC (JSON-LD + multi-query) → fallback a SEED_DATA
 │   ├── extractor.py       # SKILLS_CATALOG + extract_skills() + rank_skills()
-│   ├── models.py          # pymongo: save_ranking / get_ranking / list_careers
+│   ├── models.py          # pymongo: save/get_ranking, list_especialidades, metricas
 │   ├── becas.py           # SEED_BECAS + filtrar_becas()
+│   ├── test_logic.py      # Tests pytest de la lógica del scraper
 │   └── requirements.txt
+├── tests/                 # Tests Vitest de la lógica Node
+├── scripts/               # verificar-plan.mjs (npm run verify:plan)
 ├── docs/contexto/         # Esta carpeta
 ├── iniciar.bat            # Arranca ambos servicios con doble clic (Windows)
 ├── Procfile               # worker: npm start (Railway)
-├── package.json           # ESM, scripts start/dev, dependencias
+├── package.json           # ESM, scripts start/dev/test/lint, dependencias
 └── .env / .env.example
 ```
 
@@ -62,15 +69,15 @@ asistente/
 
 /miCV       → GET /skills
             → matchSkills(profile.habilidades, skills)
-            → push score a profile.cvScores → guarda en MongoDB
+            → recordScore() (1 entrada por mes+especialidad) → guarda en MongoDB
 
 /plan       → GET /skills → extrae missing skills
             → POST Groq /openai/v1/chat/completions (Llama 3.3 70B)
             → respuesta al usuario
 
 /becas      → GET /becas (Python)
-            → filtrar_becas(carrera) sobre SEED_BECAS
-            → respuesta con semáforo de días
+            → filtrar_becas(especialidad, carrera) sobre SEED_BECAS
+            → respuesta ordenada por relevancia + semáforo de días
 
 /progreso   → lee profile.cvScores (últimos 6)
             → generarGraficaProgreso() → gráfica ASCII
@@ -115,11 +122,9 @@ capturando una rebanada más realista del mercado que un solo slug.
 ## Qué NO existe
 
 - Tests de integración/e2e de los comandos (sí hay unitarios de lógica pura: Vitest + pytest)
-- Autenticación o autorización adicional (solo telegramId implícito)
-- Rate limiting en el bot o en la API Flask
-- Caché en memoria (Redis, etc.)
-- Google Calendar integration (mencionada en README, no implementada)
-- Panel de administración con autenticación de usuarios (sí hay un `/dashboard` de métricas protegido por API key)
-- Logs estructurados / observabilidad (solo console.log / print)
+- Autenticación de usuarios finales (solo telegramId implícito; entre servicios sí hay `API_SECRET_KEY`)
+- Caché distribuida (Redis, etc.) — el rate limit y el estado de quiz/entrevista viven en memoria del proceso
+- Google Calendar integration (planeada en su momento, no implementada)
+- Panel de administración con login (sí hay un `/dashboard` de métricas protegido por API key)
 - Multilenguaje (solo español)
-- Variables de entorno en producción cloud (Railway no configurado todavía)
+- Deploy en la nube (corre local con `iniciar.bat`; Railway no configurado todavía)

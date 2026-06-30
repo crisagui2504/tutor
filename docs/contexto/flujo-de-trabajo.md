@@ -11,7 +11,7 @@
    [BOT]     ⏰ Scheduler iniciado
    [SCRAPER] [SCRAPER] Iniciando en http://localhost:5001
    ```
-4. Abre Telegram y envía `/start` a tu bot.
+3. Abre Telegram y envía `/start` a tu bot.
 
 ## Hacer un cambio en el bot (Node.js)
 
@@ -50,13 +50,25 @@ paso devuelve `{ ok, generateCV: true }` en vez de `next` para disparar el PDF.
    ```
 2. Registra el comando en BotFather si debe aparecer en el menú de Telegram.
 
-## Agregar una carrera al scraper
+## Ajustar una especialidad en el scraper
 
-1. En `scraper/scraper.py`, agrega la entrada en `CARRERA_MAP`:
+Las 5 especialidades son un contrato compartido (Node ↔ Python). Para afinar
+los datos de una:
+
+1. En `scraper/scraper.py`, edita la lista de títulos de OCC en `ESPECIALIDAD_MAP`:
    ```python
-   "mi carrera": "slug-de-occ",
+   "datos-ia": ["data-scientist", "analista-de-datos", "data-engineer"],
    ```
-2. Si OCC no tiene un slug adecuado, agrega también un array en `SEED_DATA` con los mismo formato que los existentes.
+2. Ajusta su `SEED_DATA[especialidad]` (skills de fallback cuando OCC bloquea).
+3. Para una especialidad NUEVA hay que tocar ambos lados: `ESPECIALIDADES` en
+   `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP` + `SEED_DATA` (Python),
+   usando la misma `key`.
+
+## Verificar que /plan sigue siendo personalizado
+
+Tras cambiar el prompt o el modelo de Groq, corre `npm run verify:plan`. Genera
+planes para perfiles contrastantes y comprueba cobertura de skills, recursos por
+especialidad y que dos planes distintos no se parezcan (señal de genérico).
 
 ## Checklist de "terminado"
 

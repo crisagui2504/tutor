@@ -14,8 +14,8 @@
 | **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
 | **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
 | **Puntos / Racha / Nivel** | Gamificación (`gamificacion.js`). Puntos: +10 por acierto en `/quiz`, +50 por check-in semanal "sí". Nivel = puntos/100. Racha = semanas consecutivas completando el check-in (0 al fallar). |
-| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
-| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
+| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url`, y listas de `especialidades` y `carreras` compatibles (se ordena por relevancia a la especialidad). |
+| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC, indexado por **especialidad**. |
 
 ## Siglas y abreviaciones internas
 
@@ -25,7 +25,7 @@
 | **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
 | **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
 | **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
-| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
+| **ESPECIALIDAD_MAP** | Mapa de especialidad → lista de títulos de OCC en `scraper.py` (`datos-ia → [data-scientist, analista-de-datos, data-engineer]`) |
 | **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
 | **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
 | **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
@@ -60,7 +60,7 @@
 | `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
 | `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
 | `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
-| `/mercado` | Top 5 skills más pedidas para la carrera |
+| `/mercado` | Top 5 skills más pedidas en tu especialidad |
 | `/miCV` | Score de compatibilidad CV vs mercado |
 | `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
 | `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
@@ -68,6 +68,6 @@
 | `/plan` | Plan de estudios de 8 semanas con Groq |
 | `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
 | `/entrevista` | Entrevista técnica simulada: preguntas abiertas evaluadas por IA |
-| `/becas` | Becas filtradas por carrera con días restantes |
+| `/becas` | Becas filtradas por especialidad (y carrera) con días restantes |
 | `/progreso` | Gráfica ASCII del historial de scores |
 | `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |

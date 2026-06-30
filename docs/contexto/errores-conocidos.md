@@ -44,27 +44,28 @@
 **Fix**: verificar la key en https://console.groq.com y que `GROQ_MODEL` sea un modelo activo (ej. `llama-3.3-70b-versatile`).
 **Nota**: ya NO se usa Ollama. No hace falta tener nada corriendo localmente para `/plan`.
 
-## 8. `scraper/__pycache__` no existe → no instala dependencias Python
+## 7. `scraper/__pycache__` no existe → no instala dependencias Python
 
 **Síntoma**: `iniciar.bat` no instala requirements.txt aunque es la primera vez.
 **Causa**: la condición `if not exist "scraper\__pycache__"` es un proxy imperfecto para "¿están instaladas las dependencias?".
 **Workaround**: si las dependencias no están, ejecutar manualmente `py -m pip install -r scraper\requirements.txt`.
 
-## 9. Conflicto de versiones BeautifulSoup / seleniumbase
+## 8. Versiones fijadas en requirements.txt
 
-**Síntoma**: `pip install` falla con conflicto de versiones.
-**Causa**: seleniumbase requiere `beautifulsoup4~=4.15.0`; versiones anteriores o posteriores rompen.
-**Fix activo**: `requirements.txt` fija `beautifulsoup4==4.15.0` y `requests==2.34.2`.
-**Regla**: no actualizar estas versiones sin verificar compatibilidad con seleniumbase.
+**Síntoma**: `pip install` puede fallar con conflictos si se actualizan a ciegas.
+**Fix activo**: `requirements.txt` fija `beautifulsoup4==4.15.0` y `requests==2.34.2`
+(quedaron de cuando se probó seleniumbase, que ya NO se usa).
+**Regla**: si subes estas versiones, corre `cd scraper && python -m pytest` para
+confirmar que el parseo (JSON-LD + selectores) sigue funcionando.
 
-## 10. `/progreso` con entradas duplicadas del mismo mes — RESUELTO
+## 9. `/progreso` con entradas duplicadas del mismo mes — RESUELTO
 
 **Antes**: `/miCV` hacía `push` del score en cada llamada, duplicando la entrada del mes.
-**Fix activo**: `recordScore(profile, score)` en `cv_matcher.js` hace upsert por mes-año:
-si ya hay medición de este mes la actualiza (refleja mejoras), si no la agrega. Usado
-tanto por `/miCV` como por el re-score mensual del scheduler.
+**Fix activo**: `recordScore(profile, score, especialidad)` en `cv_matcher.js` hace upsert
+por mes-año **y especialidad**: si ya hay medición de este mes la actualiza (refleja
+mejoras), si no la agrega. Usado por `/miCV` y por el re-score mensual del scheduler.
 
-## 11. Semáforo de becas con fechas vencidas
+## 10. Semáforo de becas con fechas vencidas
 
 **Síntoma**: una beca puede mostrar `0 días` si su `fecha_limite` ya pasó.
 **Causa**: `SEED_BECAS` tiene fechas fijas; no se actualiza automáticamente.

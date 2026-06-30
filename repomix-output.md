@@ -57,6 +57,7 @@ scraper/requirements.txt
 scraper/ruff.toml
 scraper/scraper.py
 scraper/test_logic.py
+scripts/verificar-plan.mjs
 src/bot/cv_generator.js
 src/bot/cv_matcher.js
 src/bot/entrevista.js
@@ -83,155 +84,90 @@ tests/progreso.test.js
 
 # Files
 
-## File: src/bot/entrevista.js
+## File: scripts/verificar-plan.mjs
 ````javascript
-import { z } from 'zod';
-import { config } from '../config.js';
-import { STATES } from './states.js';
-import { otorgarPuntos } from './gamificacion.js';
-import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
-
 /**
- * Entrevista técnica simulada. Groq genera preguntas ABIERTAS por especialidad;
- * el usuario responde con texto libre y Groq evalúa cada respuesta (feedback +
- * puntuación 1-5). El estado vive en memoria (efímero) y la conversación se
- * enruta vía STATES.ENTREVISTA en el handler de texto.
+ * Verifica que /plan sea PERSONALIZADO y no genérico.
+ *
+ * Genera planes para dos perfiles muy distintos y comprueba:
+ *  1. Cobertura: el plan menciona las skills que le faltan a ese estudiante.
+ *  2. Recursos correctos: usa plataformas propias de su especialidad.
+ *  3. No se cruzan: el de ciberseguridad NO usa recursos de datos y viceversa.
+ *  4. Diferencia: los dos planes son sustancialmente distintos.
+ *
+ * Uso:  node scripts/verificar-plan.mjs
  */
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+import 'dotenv/config';
+import { generatePlan } from '../src/bot/planner.js';
 
-const entrevistas = new Map();
+const perfilDatos = {
+  nombre: 'Ana',
+  carrera: 'Ing en Sistemas',
+  especialidad: 'datos-ia',
+  semestre: 6,
+  nivel: 'principiante',
+  objetivo: 'startup',
+  habilidades: ['Python', 'SQL'],
+  horario: new Map([['lunes', '19:00-21:00'], ['sabado', '09:00-13:00']]),
+};
+const perfilCiber = {
+  nombre: 'Luis',
+  carrera: 'Ing en Sistemas',
+  especialidad: 'ciberseguridad',
+  semestre: 6,
+  nivel: 'avanzado',
+  objetivo: 'corporativo',
+  habilidades: ['Python', 'Git'],
+  horario: new Map([['martes', '20:00-22:00'], ['domingo', '10:00-12:00']]),
+};
 
-const PREGUNTAS_SCHEMA = z.object({
-  preguntas: z.array(z.string().min(1)).min(1),
-});
-const EVAL_SCHEMA = z.object({
-  feedback: z.string().min(1),
-  puntuacion: z.number().int().min(1).max(5),
-});
+const faltantesDatos = ['Pandas', 'Machine Learning', 'Power BI'];
+const faltantesCiber = ['Linux', 'Bash', 'Wireshark'];
 
-/**
- * Llama a Groq pidiendo JSON y lo parsea. Lanza si falla la red o el parseo.
- */
-async function callGroqJSON(prompt, maxTokens = 800) {
-  const res = await fetch(GROQ_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.groqKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.6,
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' },
-    }),
-  });
-  if (!res.ok) throw new Error(`Groq ${res.status}`);
-  const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content ?? '';
-  return JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+const cuenta = (texto, palabras) =>
+  palabras.filter((p) => texto.toLowerCase().includes(p.toLowerCase()));
+
+const RES_DATOS = ['kaggle', 'fast.ai', 'datacamp', 'pandas', 'google data'];
+const RES_CIBER = ['tryhackme', 'hackthebox', 'hack the box', 'overthewire', 'portswigger'];
+
+console.log('Generando dos planes (puede tardar ~10s)...\n');
+const [planDatos, planCiber] = await Promise.all([
+  generatePlan(perfilDatos, faltantesDatos),
+  generatePlan(perfilCiber, faltantesCiber),
+]);
+
+function reporte(nombre, plan, faltantes, recursosPropios, recursosAjenos) {
+  const cubiertas = cuenta(plan, faltantes);
+  const propios = cuenta(plan, recursosPropios);
+  const ajenos = cuenta(plan, recursosAjenos);
+  console.log(`=== Plan de ${nombre} (${plan.length} chars) ===`);
+  console.log(`1. Cobertura skills faltantes: ${cubiertas.length}/${faltantes.length} -> ${cubiertas.join(', ')}`);
+  console.log(`2. Recursos de SU especialidad: ${propios.length ? propios.join(', ') : 'NINGUNO ⚠️'}`);
+  console.log(`3. Recursos de OTRA especialidad (debe ser 0): ${ajenos.length ? ajenos.join(', ') + ' ⚠️' : 'ninguno ✅'}`);
+  console.log('');
+  return { cubiertas: cubiertas.length, propios: propios.length, ajenos: ajenos.length };
 }
 
-async function generarPreguntas(profile) {
-  const especialidad = labelDe(profile.especialidad, ESPECIALIDADES);
-  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'principiante';
-  const prompt = `Eres entrevistador técnico de ${especialidad} en México. Genera 3 preguntas de entrevista ABIERTAS (no de opción múltiple) para un candidato nivel ${nivel}, que evalúen conocimiento práctico real.
+const rD = reporte('Ana (datos-ia)', planDatos, faltantesDatos, RES_DATOS, RES_CIBER);
+const rC = reporte('Luis (ciberseguridad)', planCiber, faltantesCiber, RES_CIBER, RES_DATOS);
 
-Devuelve SOLO JSON: { "preguntas": ["...", "...", "..."] }
-En español, preguntas concretas y realistas de una entrevista.`;
+// 4. Diferencia entre ambos planes (Jaccard de palabras significativas)
+const tokens = (t) => new Set(t.toLowerCase().match(/[a-záéíóúñ.]{4,}/g) || []);
+const a = tokens(planDatos);
+const b = tokens(planCiber);
+const inter = [...a].filter((w) => b.has(w)).length;
+const union = new Set([...a, ...b]).size;
+const similitud = Math.round((inter / union) * 100);
 
-  const json = await callGroqJSON(prompt, 700);
-  const parsed = PREGUNTAS_SCHEMA.safeParse(json);
-  if (!parsed.success) throw new Error('Preguntas inválidas');
-  return parsed.data.preguntas.slice(0, 3);
-}
-
-async function evaluarConGroq(profile, pregunta, respuesta) {
-  const especialidad = labelDe(profile.especialidad, ESPECIALIDADES);
-  const prompt = `Eres entrevistador técnico de ${especialidad}. Evalúa la respuesta del candidato de forma constructiva.
-
-Pregunta: ${pregunta}
-Respuesta del candidato: ${respuesta}
-
-Devuelve SOLO JSON: { "feedback": "2-3 frases: qué estuvo bien y qué mejorar", "puntuacion": <entero 1-5> }
-Sé específico y alentador. En español.`;
-
-  const json = await callGroqJSON(prompt, 500);
-  const parsed = EVAL_SCHEMA.safeParse(json);
-  if (!parsed.success) throw new Error('Evaluación inválida');
-  return parsed.data;
-}
-
-function enviarPregunta(ctx, estado) {
-  const q = estado.preguntas[estado.actual];
-  return ctx.reply(
-    `🎤 Pregunta ${estado.actual + 1}/${estado.preguntas.length}\n\n${q}\n\n` +
-      '(Responde con tu mejor respuesta, como en una entrevista real)'
-  );
-}
-
-/**
- * Inicia la entrevista: genera preguntas, guarda estado, marca el conversation
- * state y envía la primera. Lanza si Groq falla (el caller avisa al usuario).
- */
-export async function iniciarEntrevista(ctx, profile) {
-  const preguntas = await generarPreguntas(profile);
-  entrevistas.set(ctx.from.id, { preguntas, actual: 0, puntuaciones: [] });
-  profile.conversationState = STATES.ENTREVISTA;
-  await profile.save();
-  await enviarPregunta(ctx, entrevistas.get(ctx.from.id));
-}
-
-/**
- * Procesa una respuesta de texto durante la entrevista: la evalúa, da feedback
- * y avanza; al terminar cierra, otorga puntos y vuelve a DONE.
- */
-export async function responderEntrevista(ctx, profile, texto) {
-  const estado = entrevistas.get(ctx.from.id);
-  if (!estado) {
-    // Estado perdido (p.ej. reinicio del bot): saca al usuario del modo entrevista
-    profile.conversationState = STATES.DONE;
-    await profile.save();
-    return ctx.reply('La entrevista expiró 🙂 Usa /entrevista para empezar otra.');
-  }
-
-  await ctx.sendChatAction('typing');
-  const pregunta = estado.preguntas[estado.actual];
-
-  let evaluacion;
-  try {
-    evaluacion = await evaluarConGroq(profile, pregunta, texto);
-  } catch {
-    evaluacion = { feedback: 'No pude evaluar esta respuesta, pero ¡buen intento!', puntuacion: 3 };
-  }
-  estado.puntuaciones.push(evaluacion.puntuacion);
-  await ctx.reply(`📝 ${'⭐'.repeat(evaluacion.puntuacion)}\n${evaluacion.feedback}`);
-
-  estado.actual++;
-  if (estado.actual < estado.preguntas.length) {
-    return enviarPregunta(ctx, estado);
-  }
-
-  // Fin de la entrevista
-  const total = estado.puntuaciones.length;
-  const prom = Math.round((estado.puntuaciones.reduce((a, b) => a + b, 0) / total) * 10) / 10;
-  entrevistas.delete(ctx.from.id);
-  profile.conversationState = STATES.DONE;
-
-  const ganados = Math.round(prom * 10); // hasta 50 pts
-  const r = otorgarPuntos(profile, ganados);
-  await profile.save();
-
-  await ctx.reply(
-    `🎤 *Entrevista terminada*\nPromedio: *${prom}/5* ⭐\n` +
-      `⭐ +${ganados} puntos (total: ${r.total})` +
-      (r.subioNivel ? `\n🎉 ¡Subiste al nivel ${r.nivel}!` : '') +
-      '\n\nUsa /cv para tu CV o /plan para seguir preparándote.',
-    { parse_mode: 'Markdown' }
-  );
-}
+console.log('=== Veredicto ===');
+console.log(`4. Similitud entre los dos planes: ${similitud}% (bajo = personalizado, alto = genérico)`);
+const ok =
+  rD.cubiertas >= 2 && rC.cubiertas >= 2 &&
+  rD.propios >= 1 && rC.propios >= 1 &&
+  rD.ajenos === 0 && rC.ajenos === 0 &&
+  similitud < 40;
+console.log(ok ? '\n✅ PERSONALIZADO: cubre skills, usa recursos propios y los planes difieren.'
+              : '\n⚠️ Revisar: algún criterio falló (ver arriba).');
 ````
 
 ## File: .prettierignore
@@ -383,27 +319,28 @@ package-lock.json
 **Fix**: verificar la key en https://console.groq.com y que `GROQ_MODEL` sea un modelo activo (ej. `llama-3.3-70b-versatile`).
 **Nota**: ya NO se usa Ollama. No hace falta tener nada corriendo localmente para `/plan`.
 
-## 8. `scraper/__pycache__` no existe → no instala dependencias Python
+## 7. `scraper/__pycache__` no existe → no instala dependencias Python
 
 **Síntoma**: `iniciar.bat` no instala requirements.txt aunque es la primera vez.
 **Causa**: la condición `if not exist "scraper\__pycache__"` es un proxy imperfecto para "¿están instaladas las dependencias?".
 **Workaround**: si las dependencias no están, ejecutar manualmente `py -m pip install -r scraper\requirements.txt`.
 
-## 9. Conflicto de versiones BeautifulSoup / seleniumbase
+## 8. Versiones fijadas en requirements.txt
 
-**Síntoma**: `pip install` falla con conflicto de versiones.
-**Causa**: seleniumbase requiere `beautifulsoup4~=4.15.0`; versiones anteriores o posteriores rompen.
-**Fix activo**: `requirements.txt` fija `beautifulsoup4==4.15.0` y `requests==2.34.2`.
-**Regla**: no actualizar estas versiones sin verificar compatibilidad con seleniumbase.
+**Síntoma**: `pip install` puede fallar con conflictos si se actualizan a ciegas.
+**Fix activo**: `requirements.txt` fija `beautifulsoup4==4.15.0` y `requests==2.34.2`
+(quedaron de cuando se probó seleniumbase, que ya NO se usa).
+**Regla**: si subes estas versiones, corre `cd scraper && python -m pytest` para
+confirmar que el parseo (JSON-LD + selectores) sigue funcionando.
 
-## 10. `/progreso` con entradas duplicadas del mismo mes — RESUELTO
+## 9. `/progreso` con entradas duplicadas del mismo mes — RESUELTO
 
 **Antes**: `/miCV` hacía `push` del score en cada llamada, duplicando la entrada del mes.
-**Fix activo**: `recordScore(profile, score)` en `cv_matcher.js` hace upsert por mes-año:
-si ya hay medición de este mes la actualiza (refleja mejoras), si no la agrega. Usado
-tanto por `/miCV` como por el re-score mensual del scheduler.
+**Fix activo**: `recordScore(profile, score, especialidad)` en `cv_matcher.js` hace upsert
+por mes-año **y especialidad**: si ya hay medición de este mes la actualiza (refleja
+mejoras), si no la agrega. Usado por `/miCV` y por el re-score mensual del scheduler.
 
-## 11. Semáforo de becas con fechas vencidas
+## 10. Semáforo de becas con fechas vencidas
 
 **Síntoma**: una beca puede mostrar `0 días` si su `fecha_limite` ya pasó.
 **Causa**: `SEED_BECAS` tiene fechas fijas; no se actualiza automáticamente.
@@ -425,7 +362,7 @@ tanto por `/miCV` como por el re-score mensual del scheduler.
    [BOT]     ⏰ Scheduler iniciado
    [SCRAPER] [SCRAPER] Iniciando en http://localhost:5001
    ```
-4. Abre Telegram y envía `/start` a tu bot.
+3. Abre Telegram y envía `/start` a tu bot.
 
 ## Hacer un cambio en el bot (Node.js)
 
@@ -464,13 +401,25 @@ paso devuelve `{ ok, generateCV: true }` en vez de `next` para disparar el PDF.
    ```
 2. Registra el comando en BotFather si debe aparecer en el menú de Telegram.
 
-## Agregar una carrera al scraper
+## Ajustar una especialidad en el scraper
 
-1. En `scraper/scraper.py`, agrega la entrada en `CARRERA_MAP`:
+Las 5 especialidades son un contrato compartido (Node ↔ Python). Para afinar
+los datos de una:
+
+1. En `scraper/scraper.py`, edita la lista de títulos de OCC en `ESPECIALIDAD_MAP`:
    ```python
-   "mi carrera": "slug-de-occ",
+   "datos-ia": ["data-scientist", "analista-de-datos", "data-engineer"],
    ```
-2. Si OCC no tiene un slug adecuado, agrega también un array en `SEED_DATA` con los mismo formato que los existentes.
+2. Ajusta su `SEED_DATA[especialidad]` (skills de fallback cuando OCC bloquea).
+3. Para una especialidad NUEVA hay que tocar ambos lados: `ESPECIALIDADES` en
+   `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP` + `SEED_DATA` (Python),
+   usando la misma `key`.
+
+## Verificar que /plan sigue siendo personalizado
+
+Tras cambiar el prompt o el modelo de Groq, corre `npm run verify:plan`. Genera
+planes para perfiles contrastantes y comprueba cobertura de skills, recursos por
+especialidad y que dos planes distintos no se parezcan (señal de genérico).
 
 ## Checklist de "terminado"
 
@@ -570,7 +519,8 @@ worker: npm start
 
 Bot que conoce al estudiante mediante un onboarding conversacional, detecta sus
 brechas de habilidades frente al mercado laboral **de su especialidad**, le arma
-un plan de estudios personalizado con IA, le encuentra becas y le genera un CV
+un plan de estudios personalizado con IA, lo refuerza con quizzes y entrevistas
+simuladas, lo gamifica con puntos y racha, le encuentra becas y le genera un CV
 estilo Harvard en PDF.
 
 > Documentación detallada (arquitectura, convenciones, decisiones, glosario,
@@ -579,11 +529,12 @@ estilo Harvard en PDF.
 ## Stack
 
 - **Node.js 20+** + **Telegraf.js** — bot de Telegram
-- **Python 3.11 + Flask** — scraper de mercado y API de skills/becas (puerto 5001)
+- **Python 3.11 + Flask** — scraper de mercado, API de skills/becas y dashboard (puerto 5001)
 - **MongoDB Atlas** — perfil del estudiante y rankings de skills
-- **Groq (Llama 3.3 70B)** — genera el plan de estudios y estructura el CV
+- **Groq (Llama 3.3 70B)** — plan de estudios, CV, quiz y entrevista; salida validada con **Zod**
 - **PDFKit** — CV estilo Harvard en PDF (JS puro, Times-Roman incluido)
 - **pino** — logging estructurado · **node-cron / APScheduler** — tareas programadas
+- **Vitest** + **pytest** — tests de la lógica pura · **ESLint/Prettier/Ruff** — lint
 
 ## La capa de especialidad
 
@@ -596,13 +547,18 @@ contrato compartido entre `src/bot/especialidades.js` (Node) y `scraper.py` (Pyt
 
 | Comando | Qué hace |
 | --- | --- |
-| `/start` | Onboarding conversacional (perfil + especialidad + nivel) |
+| `/start` | Onboarding conversacional (perfil + especialidad + objetivo + nivel) |
 | `/perfil` | Muestra el perfil guardado |
 | `/especialidad` | Cambia la especialidad (recalcula todo) |
 | `/habilidades` · `/horario` | Edita un campo sin rehacer el onboarding |
 | `/mercado` | Top skills más pedidas en tu especialidad |
 | `/miCV` | Diagnóstico de compatibilidad CV vs mercado |
+| `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que falta |
+| `/comparar` | Tu compatibilidad en las 5 especialidades, rankeadas |
 | `/plan` | Plan de estudios de 8 semanas (IA, recursos por especialidad) |
+| `/quiz` | Quiz interactivo corto (botones, feedback inmediato) |
+| `/entrevista` | Entrevista técnica simulada (preguntas abiertas evaluadas por IA) |
+| `/puntos` | Puntos, nivel y racha semanal (gamificación) |
 | `/becas` | Becas filtradas por especialidad con fecha límite |
 | `/progreso` | Gráfica de evolución de tu compatibilidad |
 | `/cv` | CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
@@ -622,18 +578,26 @@ src/                      Bot Node.js (Telegraf, ESM)
     ├── states.js         Estados de la FSM
     ├── especialidades.js Taxonomía especialidad/objetivo/nivel (contrato con Python)
     ├── onboarding.js     Pasos del onboarding (prompt + handle)
-    ├── cv_matcher.js     COMPARA skills vs mercado (matchSkills, recordScore)
+    ├── scraper_client.js Cliente del scraper (URL base + auth X-API-Key)
+    ├── cv_matcher.js     COMPARA skills (matchSkills, recordScore, proyectarEscenarios)
     ├── cv_generator.js   ARMA el CV: mini-flujo /cv + Groq + PDF (PDFKit)
     ├── planner.js        Genera el plan con Groq
+    ├── quiz.js           Quiz interactivo (Groq + Zod, estado en memoria)
+    ├── entrevista.js     Entrevista simulada (preguntas abiertas evaluadas por Groq)
+    ├── gamificacion.js   Puntos, nivel y racha
     ├── progreso.js       Gráfica ASCII del historial de scores
     └── scheduler.js      Crons: check-in semanal + re-score mensual
 
 scraper/                  API Python (Flask, puerto 5001)
-├── app.py                Endpoints: /skills /scrape /becas /especialidades
-├── scraper.py            Scrape OCC → fallback a SEED_DATA por especialidad
+├── app.py                Endpoints: /skills /scrape /becas /especialidades /metrics /dashboard
+├── scraper.py            Scrape OCC (JSON-LD + multi-query) → fallback a SEED_DATA
 ├── extractor.py          Catálogo de skills + keyword matching
 ├── becas.py              Catálogo de becas + filtrado por relevancia
-└── models.py             Persistencia (pymongo, fix DNS Google)
+├── models.py             Persistencia + métricas (pymongo, fix DNS Google)
+└── test_logic.py         Tests pytest de la lógica del scraper
+
+tests/                    Tests Vitest de la lógica Node
+scripts/verificar-plan.mjs  Comprueba que /plan sea personalizado (npm run verify:plan)
 ```
 
 El onboarding es una **máquina de estados** persistida en MongoDB: el bot retoma
@@ -661,10 +625,26 @@ estado en `states.js` y su entrada en `onboarding.js`.
 | --- | --- | --- |
 | `BOT_TOKEN` | sí | Token de BotFather |
 | `MONGODB_URI` | sí | Conexión a MongoDB Atlas |
-| `GROQ_API_KEY` | sí (para `/plan` y `/cv`) | LLM en la nube |
+| `GROQ_API_KEY` | sí (para `/plan`, `/cv`, `/quiz`, `/entrevista`) | LLM en la nube |
 | `GROQ_MODEL` | no | Modelo Groq (default `llama-3.3-70b-versatile`) |
+| `API_SECRET_KEY` | no (recomendado en prod) | Secreto compartido bot↔scraper. Vacío = auth off |
 | `SCRAPER_URL` | no | URL del scraper (default `http://localhost:5001`) |
 | `LOG_LEVEL` | no | Nivel de logs (default `info`) |
+
+## Tests y calidad
+
+```bash
+npm test                        # Vitest (lógica Node)
+cd scraper && python -m pytest   # pytest (lógica del scraper)
+npm run lint                    # ESLint   ·   ruff check scraper
+npm run verify:plan             # comprueba que /plan sea personalizado, no genérico
+```
+
+## Dashboard de métricas
+
+Con el bot corriendo, abre `http://localhost:5001/dashboard?key=<API_SECRET_KEY>`
+(o sin `?key=` si la auth está desactivada en local). Muestra usuarios, % de
+onboarding, distribución por especialidad, score y puntos promedio.
 
 ## Despliegue en Railway
 
@@ -1057,6 +1037,157 @@ def test_filtrar_becas_prioriza_especialidad():
     assert "datos-ia" in primera["especialidades"] or "*" in primera["especialidades"]
     # todas traen dias_restantes calculado
     assert all("dias_restantes" in b for b in becas)
+````
+
+## File: src/bot/entrevista.js
+````javascript
+import { z } from 'zod';
+import { config } from '../config.js';
+import { STATES } from './states.js';
+import { otorgarPuntos } from './gamificacion.js';
+import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+/**
+ * Entrevista técnica simulada. Groq genera preguntas ABIERTAS por especialidad;
+ * el usuario responde con texto libre y Groq evalúa cada respuesta (feedback +
+ * puntuación 1-5). El estado vive en memoria (efímero) y la conversación se
+ * enruta vía STATES.ENTREVISTA en el handler de texto.
+ */
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+const entrevistas = new Map();
+
+const PREGUNTAS_SCHEMA = z.object({
+  preguntas: z.array(z.string().min(1)).min(1),
+});
+const EVAL_SCHEMA = z.object({
+  feedback: z.string().min(1),
+  puntuacion: z.number().int().min(1).max(5),
+});
+
+/**
+ * Llama a Groq pidiendo JSON y lo parsea. Lanza si falla la red o el parseo.
+ */
+async function callGroqJSON(prompt, maxTokens = 800) {
+  const res = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.groqKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.6,
+      max_tokens: maxTokens,
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}`);
+  const data = await res.json();
+  const raw = data.choices?.[0]?.message?.content ?? '';
+  return JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+}
+
+async function generarPreguntas(profile) {
+  const especialidad = labelDe(profile.especialidad, ESPECIALIDADES);
+  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'principiante';
+  const prompt = `Eres entrevistador técnico de ${especialidad} en México. Genera 3 preguntas de entrevista ABIERTAS (no de opción múltiple) para un candidato nivel ${nivel}, que evalúen conocimiento práctico real.
+
+Devuelve SOLO JSON: { "preguntas": ["...", "...", "..."] }
+En español, preguntas concretas y realistas de una entrevista.`;
+
+  const json = await callGroqJSON(prompt, 700);
+  const parsed = PREGUNTAS_SCHEMA.safeParse(json);
+  if (!parsed.success) throw new Error('Preguntas inválidas');
+  return parsed.data.preguntas.slice(0, 3);
+}
+
+async function evaluarConGroq(profile, pregunta, respuesta) {
+  const especialidad = labelDe(profile.especialidad, ESPECIALIDADES);
+  const prompt = `Eres entrevistador técnico de ${especialidad}. Evalúa la respuesta del candidato de forma constructiva.
+
+Pregunta: ${pregunta}
+Respuesta del candidato: ${respuesta}
+
+Devuelve SOLO JSON: { "feedback": "2-3 frases: qué estuvo bien y qué mejorar", "puntuacion": <entero 1-5> }
+Sé específico y alentador. En español.`;
+
+  const json = await callGroqJSON(prompt, 500);
+  const parsed = EVAL_SCHEMA.safeParse(json);
+  if (!parsed.success) throw new Error('Evaluación inválida');
+  return parsed.data;
+}
+
+function enviarPregunta(ctx, estado) {
+  const q = estado.preguntas[estado.actual];
+  return ctx.reply(
+    `🎤 Pregunta ${estado.actual + 1}/${estado.preguntas.length}\n\n${q}\n\n` +
+      '(Responde con tu mejor respuesta, como en una entrevista real)'
+  );
+}
+
+/**
+ * Inicia la entrevista: genera preguntas, guarda estado, marca el conversation
+ * state y envía la primera. Lanza si Groq falla (el caller avisa al usuario).
+ */
+export async function iniciarEntrevista(ctx, profile) {
+  const preguntas = await generarPreguntas(profile);
+  entrevistas.set(ctx.from.id, { preguntas, actual: 0, puntuaciones: [] });
+  profile.conversationState = STATES.ENTREVISTA;
+  await profile.save();
+  await enviarPregunta(ctx, entrevistas.get(ctx.from.id));
+}
+
+/**
+ * Procesa una respuesta de texto durante la entrevista: la evalúa, da feedback
+ * y avanza; al terminar cierra, otorga puntos y vuelve a DONE.
+ */
+export async function responderEntrevista(ctx, profile, texto) {
+  const estado = entrevistas.get(ctx.from.id);
+  if (!estado) {
+    // Estado perdido (p.ej. reinicio del bot): saca al usuario del modo entrevista
+    profile.conversationState = STATES.DONE;
+    await profile.save();
+    return ctx.reply('La entrevista expiró 🙂 Usa /entrevista para empezar otra.');
+  }
+
+  await ctx.sendChatAction('typing');
+  const pregunta = estado.preguntas[estado.actual];
+
+  let evaluacion;
+  try {
+    evaluacion = await evaluarConGroq(profile, pregunta, texto);
+  } catch {
+    evaluacion = { feedback: 'No pude evaluar esta respuesta, pero ¡buen intento!', puntuacion: 3 };
+  }
+  estado.puntuaciones.push(evaluacion.puntuacion);
+  await ctx.reply(`📝 ${'⭐'.repeat(evaluacion.puntuacion)}\n${evaluacion.feedback}`);
+
+  estado.actual++;
+  if (estado.actual < estado.preguntas.length) {
+    return enviarPregunta(ctx, estado);
+  }
+
+  // Fin de la entrevista
+  const total = estado.puntuaciones.length;
+  const prom = Math.round((estado.puntuaciones.reduce((a, b) => a + b, 0) / total) * 10) / 10;
+  entrevistas.delete(ctx.from.id);
+  profile.conversationState = STATES.DONE;
+
+  const ganados = Math.round(prom * 10); // hasta 50 pts
+  const r = otorgarPuntos(profile, ganados);
+  await profile.save();
+
+  await ctx.reply(
+    `🎤 *Entrevista terminada*\nPromedio: *${prom}/5* ⭐\n` +
+      `⭐ +${ganados} puntos (total: ${r.total})` +
+      (r.subioNivel ? `\n🎉 ¡Subiste al nivel ${r.nivel}!` : '') +
+      '\n\nUsa /cv para tu CV o /plan para seguir preparándote.',
+    { parse_mode: 'Markdown' }
+  );
+}
 ````
 
 ## File: src/bot/especialidades.js
@@ -1673,50 +1804,6 @@ export function scraperBecas(especialidad, carrera, limit = 5) {
   });
   return fetch(`${config.scraperUrl}/becas?${params}`, { headers: headers() });
 }
-````
-
-## File: src/bot/states.js
-````javascript
-/**
- * Estados de la maquina de conversacion (el "formulario invisible").
- *
- * Cada mensaje del usuario hace avanzar al siguiente estado. El estado actual
- * vive en `profile.conversationState` en MongoDB.
- *
- * Flujo del onboarding:
- *   NEW -> ASK_NOMBRE -> ASK_CARRERA -> ASK_SEMESTRE -> ASK_PROMEDIO
- *       -> ASK_HABILIDADES -> ASK_HORARIO -> DONE
- */
-export const STATES = {
-  NEW: 'NEW',                     // recien creado, aun no empieza
-  ASK_NOMBRE: 'ASK_NOMBRE',
-  ASK_CARRERA: 'ASK_CARRERA',
-  ASK_ESPECIALIDAD: 'ASK_ESPECIALIDAD', // hacia donde va (dirige todo el bot)
-  ASK_OBJETIVO: 'ASK_OBJETIVO',         // tipo de empresa (opcional)
-  ASK_SEMESTRE: 'ASK_SEMESTRE',
-  ASK_PROMEDIO: 'ASK_PROMEDIO',
-  ASK_HABILIDADES: 'ASK_HABILIDADES',
-  ASK_NIVEL: 'ASK_NIVEL',               // nivel autopercibido (3 puntos)
-  ASK_HORARIO: 'ASK_HORARIO',
-  DONE: 'DONE',                   // onboarding terminado
-
-  // Edicion puntual (post-onboarding): editan un solo campo y vuelven a DONE
-  // sin re-preguntar todo. Los activan los comandos /habilidades, /horario, /especialidad.
-  EDIT_HABILIDADES: 'EDIT_HABILIDADES',
-  EDIT_HORARIO: 'EDIT_HORARIO',
-  EDIT_ESPECIALIDAD: 'EDIT_ESPECIALIDAD',
-
-  // Mini-flujo del comando /cv (independiente del onboarding). Al terminar
-  // genera el PDF en vez de volver al menú.
-  CV_ASK_PROYECTOS: 'CV_ASK_PROYECTOS',
-  CV_ASK_LOGROS: 'CV_ASK_LOGROS',
-  CV_ASK_LINKS: 'CV_ASK_LINKS',
-  CV_ASK_EMAIL: 'CV_ASK_EMAIL',
-
-  // Entrevista simulada (/entrevista): el usuario responde texto libre y Groq
-  // evalúa cada respuesta. Las preguntas viven en memoria (entrevista.js).
-  ENTREVISTA: 'ENTREVISTA',
-};
 ````
 
 ## File: src/db.js
@@ -3057,6 +3144,50 @@ export function startScheduler(bot) {
 }
 ````
 
+## File: src/bot/states.js
+````javascript
+/**
+ * Estados de la maquina de conversacion (el "formulario invisible").
+ *
+ * Cada mensaje del usuario hace avanzar al siguiente estado. El estado actual
+ * vive en `profile.conversationState` en MongoDB.
+ *
+ * Flujo del onboarding:
+ *   NEW -> ASK_NOMBRE -> ASK_CARRERA -> ASK_SEMESTRE -> ASK_PROMEDIO
+ *       -> ASK_HABILIDADES -> ASK_HORARIO -> DONE
+ */
+export const STATES = {
+  NEW: 'NEW',                     // recien creado, aun no empieza
+  ASK_NOMBRE: 'ASK_NOMBRE',
+  ASK_CARRERA: 'ASK_CARRERA',
+  ASK_ESPECIALIDAD: 'ASK_ESPECIALIDAD', // hacia donde va (dirige todo el bot)
+  ASK_OBJETIVO: 'ASK_OBJETIVO',         // tipo de empresa (opcional)
+  ASK_SEMESTRE: 'ASK_SEMESTRE',
+  ASK_PROMEDIO: 'ASK_PROMEDIO',
+  ASK_HABILIDADES: 'ASK_HABILIDADES',
+  ASK_NIVEL: 'ASK_NIVEL',               // nivel autopercibido (3 puntos)
+  ASK_HORARIO: 'ASK_HORARIO',
+  DONE: 'DONE',                   // onboarding terminado
+
+  // Edicion puntual (post-onboarding): editan un solo campo y vuelven a DONE
+  // sin re-preguntar todo. Los activan los comandos /habilidades, /horario, /especialidad.
+  EDIT_HABILIDADES: 'EDIT_HABILIDADES',
+  EDIT_HORARIO: 'EDIT_HORARIO',
+  EDIT_ESPECIALIDAD: 'EDIT_ESPECIALIDAD',
+
+  // Mini-flujo del comando /cv (independiente del onboarding). Al terminar
+  // genera el PDF en vez de volver al menú.
+  CV_ASK_PROYECTOS: 'CV_ASK_PROYECTOS',
+  CV_ASK_LOGROS: 'CV_ASK_LOGROS',
+  CV_ASK_LINKS: 'CV_ASK_LINKS',
+  CV_ASK_EMAIL: 'CV_ASK_EMAIL',
+
+  // Entrevista simulada (/entrevista): el usuario responde texto libre y Groq
+  // evalúa cada respuesta. Las preguntas viven en memoria (entrevista.js).
+  ENTREVISTA: 'ENTREVISTA',
+};
+````
+
 ## File: src/config.js
 ````javascript
 import 'dotenv/config';
@@ -3174,7 +3305,7 @@ export const Profile = mongoose.model('Profile', profileSchema);
 
 | Elemento | Convención | Ejemplo |
 |----------|-----------|---------|
-| Archivos Node | camelCase | `cv_matcher.js`, `onboarding.js` |
+| Archivos Node | lowercase / snake_case | `cv_matcher.js`, `scraper_client.js`, `onboarding.js` |
 | Archivos Python | snake_case | `scraper.py`, `becas.py` |
 | Funciones Node | camelCase | `matchSkills()`, `generatePlan()` |
 | Funciones Python | snake_case | `filtrar_becas()`, `rank_skills()` |
@@ -3222,7 +3353,8 @@ export const Profile = mongoose.model('Profile', profileSchema);
 ## Rate limiting
 
 - Comandos pesados pasan por `isRateLimited(telegramId, comando, segundos)` en `index.js`:
-  `/plan` 60s, `/mercado` y `/miCV` 30s. Map en memoria, se reinicia con el bot.
+  `/plan` 60s; `/mercado`, `/miCV`, `/comparar`, `/quiz`, `/entrevista` 30s; `/simular` 20s.
+  Map en memoria, se reinicia con el bot.
 
 ## Comunicación entre servicios
 
@@ -3233,8 +3365,9 @@ export const Profile = mongoose.model('Profile', profileSchema);
 
 ## Validación de salida de LLM
 
-- El JSON que devuelve Groq se valida con **Zod** antes de usarlo (ver `CV_SCHEMA`
-  en `cv_generator.js`). Si no cumple el esquema, se cae al fallback determinista.
+- Todo JSON que devuelve Groq se valida con **Zod** antes de usarlo: `CV_SCHEMA`
+  (`cv_generator.js`), `QUIZ_SCHEMA` (`quiz.js`), `PREGUNTAS_SCHEMA`/`EVAL_SCHEMA`
+  (`entrevista.js`). Si no cumple el esquema, se cae al fallback o se reintenta.
 
 ## Tests
 
@@ -3250,7 +3383,11 @@ export const Profile = mongoose.model('Profile', profileSchema);
 
 ## Commits
 
-[PENDIENTE: no hay git en el directorio del proyecto. Si se inicializa, usar Conventional Commits: `feat:`, `fix:`, `chore:`.]
+- Repo en GitHub: https://github.com/crisagui2504/tutor (rama `main`).
+- Mensajes con un título corto en presente + cuerpo explicando el porqué; cada
+  commit cierra co-autoría con `Co-Authored-By: Claude ...`.
+- Antes de subir: `npm test`, `npm run lint`, y verificar que `.env` NO quede
+  staged (está en `.gitignore`; el repo es público).
 ````
 
 ## File: package.json
@@ -3269,7 +3406,8 @@ export const Profile = mongoose.model('Profile', profileSchema);
     "lint": "eslint src",
     "format": "prettier --write \"**/*.{js,json,md}\"",
     "format:check": "prettier --check \"**/*.{js,json,md}\"",
-    "test": "vitest run"
+    "test": "vitest run",
+    "verify:plan": "node scripts/verificar-plan.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -3805,8 +3943,8 @@ if __name__ == "__main__":
 | **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
 | **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
 | **Puntos / Racha / Nivel** | Gamificación (`gamificacion.js`). Puntos: +10 por acierto en `/quiz`, +50 por check-in semanal "sí". Nivel = puntos/100. Racha = semanas consecutivas completando el check-in (0 al fallar). |
-| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
-| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
+| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url`, y listas de `especialidades` y `carreras` compatibles (se ordena por relevancia a la especialidad). |
+| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC, indexado por **especialidad**. |
 
 ## Siglas y abreviaciones internas
 
@@ -3816,7 +3954,7 @@ if __name__ == "__main__":
 | **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
 | **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
 | **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
-| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
+| **ESPECIALIDAD_MAP** | Mapa de especialidad → lista de títulos de OCC en `scraper.py` (`datos-ia → [data-scientist, analista-de-datos, data-engineer]`) |
 | **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
 | **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
 | **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
@@ -3851,7 +3989,7 @@ if __name__ == "__main__":
 | `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
 | `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
 | `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
-| `/mercado` | Top 5 skills más pedidas para la carrera |
+| `/mercado` | Top 5 skills más pedidas en tu especialidad |
 | `/miCV` | Score de compatibilidad CV vs mercado |
 | `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
 | `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
@@ -3859,7 +3997,7 @@ if __name__ == "__main__":
 | `/plan` | Plan de estudios de 8 semanas con Groq |
 | `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
 | `/entrevista` | Entrevista técnica simulada: preguntas abiertas evaluadas por IA |
-| `/becas` | Becas filtradas por carrera con días restantes |
+| `/becas` | Becas filtradas por especialidad (y carrera) con días restantes |
 | `/progreso` | Gráfica ASCII del historial de scores |
 | `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
 ````
@@ -3878,8 +4016,11 @@ if __name__ == "__main__":
 | LLM | Groq API (Llama 3.3 70B) | nube, compatible con OpenAI |
 | Scheduler Node | node-cron | 4.x |
 | Scheduler Python | APScheduler | 3.10 |
-| Logging Node | pino + pino-pretty | 9.x |
-| PDF (CV) | pdfkit (JS puro, Times-Roman built-in) | 0.15.x |
+| Logging Node | pino + pino-pretty | 10.x |
+| PDF (CV) | pdfkit (JS puro, Times-Roman built-in) | 0.19.x |
+| Validación LLM | zod | 4.x |
+| Tests | Vitest (Node) + pytest (Python) | — |
+| Lint/format | ESLint + Prettier (Node), Ruff (Python) | — |
 
 ## Mapa de carpetas
 
@@ -3896,7 +4037,8 @@ asistente/
 │       ├── states.js      # Enum de estados de la FSM
 │       ├── especialidades.js # Taxonomía (especialidad/objetivo/nivel) — contrato con Python
 │       ├── onboarding.js  # Pasos del onboarding (prompt + handle)
-│       ├── cv_matcher.js  # COMPARA skills vs mercado (matchSkills, recordScore)
+│       ├── scraper_client.js # Cliente del scraper (URL base + auth X-API-Key)
+│       ├── cv_matcher.js  # COMPARA skills (matchSkills, recordScore, proyectarEscenarios)
 │       ├── cv_generator.js # ARMA el CV: mini-flujo /cv + Groq + PDF (PDFKit)
 │       ├── planner.js     # Llama a Groq API para generar el plan
 │       ├── quiz.js        # Quiz interactivo (Groq + Zod, estado en memoria)
@@ -3905,16 +4047,19 @@ asistente/
 │       ├── progreso.js    # Gráfica ASCII del historial de scores
 │       └── scheduler.js   # Crons: check-in semanal + re-score mensual
 ├── scraper/               # API Python (puerto 5001)
-│   ├── app.py             # Flask: /health /skills /scrape /careers /becas
-│   ├── scraper.py         # Scrape OCC → fallback a SEED_DATA
+│   ├── app.py             # Flask: /health /skills /scrape /becas /especialidades /metrics /dashboard
+│   ├── scraper.py         # Scrape OCC (JSON-LD + multi-query) → fallback a SEED_DATA
 │   ├── extractor.py       # SKILLS_CATALOG + extract_skills() + rank_skills()
-│   ├── models.py          # pymongo: save_ranking / get_ranking / list_careers
+│   ├── models.py          # pymongo: save/get_ranking, list_especialidades, metricas
 │   ├── becas.py           # SEED_BECAS + filtrar_becas()
+│   ├── test_logic.py      # Tests pytest de la lógica del scraper
 │   └── requirements.txt
+├── tests/                 # Tests Vitest de la lógica Node
+├── scripts/               # verificar-plan.mjs (npm run verify:plan)
 ├── docs/contexto/         # Esta carpeta
 ├── iniciar.bat            # Arranca ambos servicios con doble clic (Windows)
 ├── Procfile               # worker: npm start (Railway)
-├── package.json           # ESM, scripts start/dev, dependencias
+├── package.json           # ESM, scripts start/dev/test/lint, dependencias
 └── .env / .env.example
 ```
 
@@ -3930,15 +4075,15 @@ asistente/
 
 /miCV       → GET /skills
             → matchSkills(profile.habilidades, skills)
-            → push score a profile.cvScores → guarda en MongoDB
+            → recordScore() (1 entrada por mes+especialidad) → guarda en MongoDB
 
 /plan       → GET /skills → extrae missing skills
             → POST Groq /openai/v1/chat/completions (Llama 3.3 70B)
             → respuesta al usuario
 
 /becas      → GET /becas (Python)
-            → filtrar_becas(carrera) sobre SEED_BECAS
-            → respuesta con semáforo de días
+            → filtrar_becas(especialidad, carrera) sobre SEED_BECAS
+            → respuesta ordenada por relevancia + semáforo de días
 
 /progreso   → lee profile.cvScores (últimos 6)
             → generarGraficaProgreso() → gráfica ASCII
@@ -3983,14 +4128,12 @@ capturando una rebanada más realista del mercado que un solo slug.
 ## Qué NO existe
 
 - Tests de integración/e2e de los comandos (sí hay unitarios de lógica pura: Vitest + pytest)
-- Autenticación o autorización adicional (solo telegramId implícito)
-- Rate limiting en el bot o en la API Flask
-- Caché en memoria (Redis, etc.)
-- Google Calendar integration (mencionada en README, no implementada)
-- Panel de administración con autenticación de usuarios (sí hay un `/dashboard` de métricas protegido por API key)
-- Logs estructurados / observabilidad (solo console.log / print)
+- Autenticación de usuarios finales (solo telegramId implícito; entre servicios sí hay `API_SECRET_KEY`)
+- Caché distribuida (Redis, etc.) — el rate limit y el estado de quiz/entrevista viven en memoria del proceso
+- Google Calendar integration (planeada en su momento, no implementada)
+- Panel de administración con login (sí hay un `/dashboard` de métricas protegido por API key)
 - Multilenguaje (solo español)
-- Variables de entorno en producción cloud (Railway no configurado todavía)
+- Deploy en la nube (corre local con `iniciar.bat`; Railway no configurado todavía)
 ````
 
 ## File: src/index.js

@@ -59,6 +59,7 @@ scraper/scraper.py
 scraper/test_logic.py
 src/bot/cv_generator.js
 src/bot/cv_matcher.js
+src/bot/entrevista.js
 src/bot/especialidades.js
 src/bot/gamificacion.js
 src/bot/onboarding.js
@@ -81,6 +82,157 @@ tests/progreso.test.js
 ```
 
 # Files
+
+## File: src/bot/entrevista.js
+````javascript
+import { z } from 'zod';
+import { config } from '../config.js';
+import { STATES } from './states.js';
+import { otorgarPuntos } from './gamificacion.js';
+import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+/**
+ * Entrevista técnica simulada. Groq genera preguntas ABIERTAS por especialidad;
+ * el usuario responde con texto libre y Groq evalúa cada respuesta (feedback +
+ * puntuación 1-5). El estado vive en memoria (efímero) y la conversación se
+ * enruta vía STATES.ENTREVISTA en el handler de texto.
+ */
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+
+const entrevistas = new Map();
+
+const PREGUNTAS_SCHEMA = z.object({
+  preguntas: z.array(z.string().min(1)).min(1),
+});
+const EVAL_SCHEMA = z.object({
+  feedback: z.string().min(1),
+  puntuacion: z.number().int().min(1).max(5),
+});
+
+/**
+ * Llama a Groq pidiendo JSON y lo parsea. Lanza si falla la red o el parseo.
+ */
+async function callGroqJSON(prompt, maxTokens = 800) {
+  const res = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.groqKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.6,
+      max_tokens: maxTokens,
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}`);
+  const data = await res.json();
+  const raw = data.choices?.[0]?.message?.content ?? '';
+  return JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+}
+
+async function generarPreguntas(profile) {
+  const especialidad = labelDe(profile.especialidad, ESPECIALIDADES);
+  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'principiante';
+  const prompt = `Eres entrevistador técnico de ${especialidad} en México. Genera 3 preguntas de entrevista ABIERTAS (no de opción múltiple) para un candidato nivel ${nivel}, que evalúen conocimiento práctico real.
+
+Devuelve SOLO JSON: { "preguntas": ["...", "...", "..."] }
+En español, preguntas concretas y realistas de una entrevista.`;
+
+  const json = await callGroqJSON(prompt, 700);
+  const parsed = PREGUNTAS_SCHEMA.safeParse(json);
+  if (!parsed.success) throw new Error('Preguntas inválidas');
+  return parsed.data.preguntas.slice(0, 3);
+}
+
+async function evaluarConGroq(profile, pregunta, respuesta) {
+  const especialidad = labelDe(profile.especialidad, ESPECIALIDADES);
+  const prompt = `Eres entrevistador técnico de ${especialidad}. Evalúa la respuesta del candidato de forma constructiva.
+
+Pregunta: ${pregunta}
+Respuesta del candidato: ${respuesta}
+
+Devuelve SOLO JSON: { "feedback": "2-3 frases: qué estuvo bien y qué mejorar", "puntuacion": <entero 1-5> }
+Sé específico y alentador. En español.`;
+
+  const json = await callGroqJSON(prompt, 500);
+  const parsed = EVAL_SCHEMA.safeParse(json);
+  if (!parsed.success) throw new Error('Evaluación inválida');
+  return parsed.data;
+}
+
+function enviarPregunta(ctx, estado) {
+  const q = estado.preguntas[estado.actual];
+  return ctx.reply(
+    `🎤 Pregunta ${estado.actual + 1}/${estado.preguntas.length}\n\n${q}\n\n` +
+      '(Responde con tu mejor respuesta, como en una entrevista real)'
+  );
+}
+
+/**
+ * Inicia la entrevista: genera preguntas, guarda estado, marca el conversation
+ * state y envía la primera. Lanza si Groq falla (el caller avisa al usuario).
+ */
+export async function iniciarEntrevista(ctx, profile) {
+  const preguntas = await generarPreguntas(profile);
+  entrevistas.set(ctx.from.id, { preguntas, actual: 0, puntuaciones: [] });
+  profile.conversationState = STATES.ENTREVISTA;
+  await profile.save();
+  await enviarPregunta(ctx, entrevistas.get(ctx.from.id));
+}
+
+/**
+ * Procesa una respuesta de texto durante la entrevista: la evalúa, da feedback
+ * y avanza; al terminar cierra, otorga puntos y vuelve a DONE.
+ */
+export async function responderEntrevista(ctx, profile, texto) {
+  const estado = entrevistas.get(ctx.from.id);
+  if (!estado) {
+    // Estado perdido (p.ej. reinicio del bot): saca al usuario del modo entrevista
+    profile.conversationState = STATES.DONE;
+    await profile.save();
+    return ctx.reply('La entrevista expiró 🙂 Usa /entrevista para empezar otra.');
+  }
+
+  await ctx.sendChatAction('typing');
+  const pregunta = estado.preguntas[estado.actual];
+
+  let evaluacion;
+  try {
+    evaluacion = await evaluarConGroq(profile, pregunta, texto);
+  } catch {
+    evaluacion = { feedback: 'No pude evaluar esta respuesta, pero ¡buen intento!', puntuacion: 3 };
+  }
+  estado.puntuaciones.push(evaluacion.puntuacion);
+  await ctx.reply(`📝 ${'⭐'.repeat(evaluacion.puntuacion)}\n${evaluacion.feedback}`);
+
+  estado.actual++;
+  if (estado.actual < estado.preguntas.length) {
+    return enviarPregunta(ctx, estado);
+  }
+
+  // Fin de la entrevista
+  const total = estado.puntuaciones.length;
+  const prom = Math.round((estado.puntuaciones.reduce((a, b) => a + b, 0) / total) * 10) / 10;
+  entrevistas.delete(ctx.from.id);
+  profile.conversationState = STATES.DONE;
+
+  const ganados = Math.round(prom * 10); // hasta 50 pts
+  const r = otorgarPuntos(profile, ganados);
+  await profile.save();
+
+  await ctx.reply(
+    `🎤 *Entrevista terminada*\nPromedio: *${prom}/5* ⭐\n` +
+      `⭐ +${ganados} puntos (total: ${r.total})` +
+      (r.subioNivel ? `\n🎉 ¡Subiste al nivel ${r.nivel}!` : '') +
+      '\n\nUsa /cv para tu CV o /plan para seguir preparándote.',
+    { parse_mode: 'Markdown' }
+  );
+}
+````
 
 ## File: .prettierignore
 ````
@@ -756,119 +908,6 @@ def rank_skills(skill_lists: list[list[str]], top_n: int = 20) -> list[dict]:
         {"skill": skill, "count": count, "pct": round(count / total * 100)}
         for skill, count in Counter(flat).most_common(top_n)
     ]
-````
-
-## File: scraper/models.py
-````python
-import os
-from datetime import datetime, timezone
-from pymongo import MongoClient
-from dotenv import load_dotenv
-
-load_dotenv()
-
-# Fuerza Google DNS para resolver el SRV de MongoDB Atlas
-# (igual que hicimos en Node.js con dns.setServers)
-try:
-    import dns.resolver
-    _resolver = dns.resolver.Resolver(configure=False)
-    _resolver.nameservers = ["8.8.8.8", "8.8.4.4"]
-    dns.resolver.default_resolver = _resolver
-except Exception:
-    pass
-
-_client = MongoClient(os.environ["MONGODB_URI"])
-_db = _client.get_default_database()
-_rankings = _db["skill_rankings"]
-_profiles = _db["profiles"]  # lo escribe el bot Node (mongoose), aquí solo se lee
-
-
-def metricas() -> dict:
-    """Agrega métricas de uso del bot desde la colección de perfiles."""
-    total = _profiles.count_documents({})
-    completos = _profiles.count_documents({"onboardingCompleto": True})
-
-    # Distribución y puntos promedio por especialidad
-    dist = list(_profiles.aggregate([
-        {"$match": {"especialidad": {"$nin": [None, ""]}}},
-        {"$group": {
-            "_id": "$especialidad",
-            "usuarios": {"$sum": 1},
-            "puntos_prom": {"$avg": "$puntos"},
-        }},
-        {"$sort": {"usuarios": -1}},
-    ]))
-
-    # Score promedio por especialidad (último score de cada usuario)
-    scores = list(_profiles.aggregate([
-        {"$match": {"cvScores.0": {"$exists": True}}},
-        {"$project": {
-            "especialidad": 1,
-            "ultimo": {"$arrayElemAt": ["$cvScores.score", -1]},
-        }},
-        {"$group": {"_id": "$especialidad", "score_prom": {"$avg": "$ultimo"}}},
-    ]))
-    score_map = {s["_id"]: round(s.get("score_prom") or 0) for s in scores}
-
-    # Totales globales
-    glob = list(_profiles.aggregate([
-        {"$group": {
-            "_id": None,
-            "puntos_totales": {"$sum": "$puntos"},
-            "racha_maxima": {"$max": "$racha"},
-        }},
-    ]))
-    g = glob[0] if glob else {}
-
-    return {
-        "usuarios": total,
-        "onboarding_completos": completos,
-        "puntos_totales": g.get("puntos_totales", 0) or 0,
-        "racha_maxima": g.get("racha_maxima", 0) or 0,
-        "especialidades": [
-            {
-                "especialidad": d["_id"],
-                "usuarios": d["usuarios"],
-                "puntos_prom": round(d.get("puntos_prom") or 0),
-                "score_prom": score_map.get(d["_id"], 0),
-            }
-            for d in dist
-        ],
-    }
-
-
-def save_ranking(especialidad: str, data: dict) -> None:
-    """Guarda el ranking de skills indexado por especialidad."""
-    key = especialidad.lower()
-    _rankings.update_one(
-        {"especialidad": key},
-        {
-            "$set": {
-                "especialidad": key,
-                "skills": data["skills"],
-                "total_jobs": data["total_jobs"],
-                "query": data["query"],
-                "updatedAt": datetime.now(timezone.utc),
-            }
-        },
-        upsert=True,
-    )
-
-
-def get_ranking(especialidad: str, limit: int = 5) -> dict | None:
-    doc = _rankings.find_one({"especialidad": especialidad.lower()}, {"_id": 0})
-    if not doc:
-        return None
-    return {
-        "especialidad": doc["especialidad"],
-        "skills": doc["skills"][:limit],
-        "total_jobs": doc.get("total_jobs", 0),
-        "updatedAt": doc.get("updatedAt", "").isoformat() if doc.get("updatedAt") else None,
-    }
-
-
-def list_especialidades() -> list[str]:
-    return [d["especialidad"] for d in _rankings.find({}, {"especialidad": 1, "_id": 0})]
 ````
 
 ## File: scraper/requirements.txt
@@ -1673,6 +1712,10 @@ export const STATES = {
   CV_ASK_LOGROS: 'CV_ASK_LOGROS',
   CV_ASK_LINKS: 'CV_ASK_LINKS',
   CV_ASK_EMAIL: 'CV_ASK_EMAIL',
+
+  // Entrevista simulada (/entrevista): el usuario responde texto libre y Groq
+  // evalúa cada respuesta. Las preguntas viven en memoria (entrevista.js).
+  ENTREVISTA: 'ENTREVISTA',
 };
 ````
 
@@ -2096,6 +2139,119 @@ coverage/
 
 # Artefactos generados
 *.pdf
+````
+
+## File: scraper/models.py
+````python
+import os
+from datetime import datetime, timezone
+from pymongo import MongoClient
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Fuerza Google DNS para resolver el SRV de MongoDB Atlas
+# (igual que hicimos en Node.js con dns.setServers)
+try:
+    import dns.resolver
+    _resolver = dns.resolver.Resolver(configure=False)
+    _resolver.nameservers = ["8.8.8.8", "8.8.4.4"]
+    dns.resolver.default_resolver = _resolver
+except Exception:
+    pass
+
+_client = MongoClient(os.environ["MONGODB_URI"])
+_db = _client.get_default_database()
+_rankings = _db["skill_rankings"]
+_profiles = _db["profiles"]  # lo escribe el bot Node (mongoose), aquí solo se lee
+
+
+def metricas() -> dict:
+    """Agrega métricas de uso del bot desde la colección de perfiles."""
+    total = _profiles.count_documents({})
+    completos = _profiles.count_documents({"onboardingCompleto": True})
+
+    # Distribución y puntos promedio por especialidad
+    dist = list(_profiles.aggregate([
+        {"$match": {"especialidad": {"$nin": [None, ""]}}},
+        {"$group": {
+            "_id": "$especialidad",
+            "usuarios": {"$sum": 1},
+            "puntos_prom": {"$avg": "$puntos"},
+        }},
+        {"$sort": {"usuarios": -1}},
+    ]))
+
+    # Score promedio por especialidad (último score de cada usuario)
+    scores = list(_profiles.aggregate([
+        {"$match": {"cvScores.0": {"$exists": True}}},
+        {"$project": {
+            "especialidad": 1,
+            "ultimo": {"$arrayElemAt": ["$cvScores.score", -1]},
+        }},
+        {"$group": {"_id": "$especialidad", "score_prom": {"$avg": "$ultimo"}}},
+    ]))
+    score_map = {s["_id"]: round(s.get("score_prom") or 0) for s in scores}
+
+    # Totales globales
+    glob = list(_profiles.aggregate([
+        {"$group": {
+            "_id": None,
+            "puntos_totales": {"$sum": "$puntos"},
+            "racha_maxima": {"$max": "$racha"},
+        }},
+    ]))
+    g = glob[0] if glob else {}
+
+    return {
+        "usuarios": total,
+        "onboarding_completos": completos,
+        "puntos_totales": g.get("puntos_totales", 0) or 0,
+        "racha_maxima": g.get("racha_maxima", 0) or 0,
+        "especialidades": [
+            {
+                "especialidad": d["_id"],
+                "usuarios": d["usuarios"],
+                "puntos_prom": round(d.get("puntos_prom") or 0),
+                "score_prom": score_map.get(d["_id"], 0),
+            }
+            for d in dist
+        ],
+    }
+
+
+def save_ranking(especialidad: str, data: dict) -> None:
+    """Guarda el ranking de skills indexado por especialidad."""
+    key = especialidad.lower()
+    _rankings.update_one(
+        {"especialidad": key},
+        {
+            "$set": {
+                "especialidad": key,
+                "skills": data["skills"],
+                "total_jobs": data["total_jobs"],
+                "query": data["query"],
+                "updatedAt": datetime.now(timezone.utc),
+            }
+        },
+        upsert=True,
+    )
+
+
+def get_ranking(especialidad: str, limit: int = 5) -> dict | None:
+    doc = _rankings.find_one({"especialidad": especialidad.lower()}, {"_id": 0})
+    if not doc:
+        return None
+    return {
+        "especialidad": doc["especialidad"],
+        "skills": doc["skills"][:limit],
+        "total_jobs": doc.get("total_jobs", 0),
+        "updatedAt": doc.get("updatedAt", "").isoformat() if doc.get("updatedAt") else None,
+    }
+
+
+def list_especialidades() -> list[str]:
+    return [d["especialidad"] for d in _rankings.find({}, {"especialidad": 1, "_id": 0})]
 ````
 
 ## File: src/bot/cv_generator.js
@@ -3140,247 +3296,6 @@ export const Profile = mongoose.model('Profile', profileSchema);
 }
 ````
 
-## File: scraper/app.py
-````python
-import atexit
-import os
-from datetime import datetime, timezone, timedelta
-from flask import Flask, jsonify, request
-from apscheduler.schedulers.background import BackgroundScheduler
-from dotenv import load_dotenv
-
-from scraper import scrape_occ, SEED_DATA, DEFAULT_SEED
-from models import save_ranking, get_ranking, list_especialidades, metricas
-from becas import filtrar_becas
-
-load_dotenv()
-
-app = Flask(__name__)
-
-# Secreto compartido con el bot Node. Si está vacío, la auth queda desactivada
-# (cómodo en local); en producción ponlo en ambos .env.
-API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
-
-
-@app.before_request
-def _check_api_key():
-    """Valida el header X-API-Key en todos los endpoints menos /health.
-
-    Solo se exige si API_SECRET_KEY está configurada; así local sigue simple.
-    """
-    if not API_SECRET_KEY or request.path == "/health":
-        return None
-    # Acepta la key por header (bot) o por query param ?key= (dashboard en navegador)
-    provided = request.headers.get("X-API-Key", "") or request.args.get("key", "")
-    if provided != API_SECRET_KEY:
-        return jsonify({"error": "No autorizado"}), 401
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
-@app.get("/skills")
-def skills():
-    """GET /skills?especialidad=datos-ia&limit=5"""
-    especialidad = request.args.get("especialidad", "").strip()
-    limit = min(int(request.args.get("limit", 5)), 20)
-
-    if not especialidad:
-        return jsonify({"error": "Falta el parámetro 'especialidad'"}), 400
-
-    data = get_ranking(especialidad, limit)
-    if not data:
-        # Sin ranking guardado: responde con datos semilla (siempre hay algo).
-        # Así /miCV, /simular y /comparar funcionan sin correr /mercado antes.
-        seed = SEED_DATA.get(especialidad.lower().strip(), DEFAULT_SEED)
-        data = {
-            "especialidad": especialidad.lower(),
-            "skills": seed[:limit],
-            "total_jobs": 100,
-            "updatedAt": None,
-            "source": "seed",
-        }
-
-    return jsonify(data)
-
-
-# Tiempo que se consideran "frescos" los datos antes de re-scrapear
-CACHE_HOURS = 24
-
-
-def _is_fresh(updated_at_iso: str) -> bool:
-    """True si la fecha ISO es de hace menos de CACHE_HOURS."""
-    try:
-        updated = datetime.fromisoformat(updated_at_iso)
-        if updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) - updated < timedelta(hours=CACHE_HOURS)
-    except (ValueError, TypeError):
-        return False
-
-
-@app.post("/scrape")
-def scrape():
-    """POST /scrape  body: { "especialidad": "datos-ia" }
-
-    Si ya hay datos de hace menos de 24h, no vuelve a scrapear (responde cached).
-    """
-    body = request.get_json(silent=True) or {}
-    especialidad = body.get("especialidad", "").strip()
-
-    if not especialidad:
-        return jsonify({"error": "Falta 'especialidad' en el body"}), 400
-
-    # Cache hit: datos frescos en MongoDB, evita el scrape (responde en <1s)
-    existing = get_ranking(especialidad, limit=1)
-    if existing and _is_fresh(existing.get("updatedAt")):
-        print(f"[SCRAPE] Cache hit para '{especialidad}' (datos de <{CACHE_HOURS}h)")
-        return jsonify({"ok": True, "especialidad": especialidad, "cached": True})
-
-    print(f"[SCRAPE] Scrapeando para: {especialidad}")
-    data = scrape_occ(especialidad)
-    save_ranking(especialidad, data)
-    print(f"[SCRAPE] Guardado: {len(data['skills'])} skills para '{especialidad}'")
-
-    return jsonify({
-        "ok": True,
-        "especialidad": especialidad,
-        "cached": False,
-        "skills_found": len(data["skills"]),
-    })
-
-
-@app.get("/especialidades")
-def especialidades():
-    return jsonify({"especialidades": list_especialidades()})
-
-
-# --- Dashboard de métricas --------------------------------------------------
-
-ESP_LABEL = {
-    "desarrollo-web": "🌐 Desarrollo Web",
-    "datos-ia": "📊 Datos e IA",
-    "ciberseguridad": "🔐 Ciberseguridad",
-    "devops-cloud": "☁️ DevOps y Cloud",
-    "redes": "🖧 Redes",
-}
-
-
-@app.get("/metrics")
-def metrics():
-    """Métricas de uso en JSON (para scripts/monitoreo)."""
-    return jsonify(metricas())
-
-
-@app.get("/dashboard")
-def dashboard():
-    """Dashboard HTML simple (server-rendered, sin JS)."""
-    m = metricas()
-    pct = round(m["onboarding_completos"] / m["usuarios"] * 100) if m["usuarios"] else 0
-    max_users = max((e["usuarios"] for e in m["especialidades"]), default=1) or 1
-
-    filas = ""
-    for e in m["especialidades"]:
-        label = ESP_LABEL.get(e["especialidad"], e["especialidad"])
-        ancho = round(e["usuarios"] / max_users * 100)
-        filas += f"""
-        <tr>
-          <td>{label}</td>
-          <td><div class="bar"><span style="width:{ancho}%"></span></div>{e['usuarios']}</td>
-          <td>{e['score_prom']}%</td>
-          <td>{e['puntos_prom']}</td>
-        </tr>"""
-
-    if not filas:
-        filas = '<tr><td colspan="4" class="empty">Aún no hay perfiles con especialidad.</td></tr>'
-
-    html = f"""<!doctype html>
-<html lang="es"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Asistente de Carrera — Métricas</title>
-<style>
-  body {{ font-family: system-ui, sans-serif; background:#0f1115; color:#e6e6e6; margin:0; padding:32px; }}
-  h1 {{ font-size:1.4rem; margin:0 0 4px; }}
-  .sub {{ color:#8a8f98; margin-bottom:24px; }}
-  .cards {{ display:flex; flex-wrap:wrap; gap:16px; margin-bottom:28px; }}
-  .card {{ background:#1a1d24; border:1px solid #272b34; border-radius:12px; padding:18px 22px; min-width:140px; }}
-  .card .n {{ font-size:2rem; font-weight:700; }}
-  .card .l {{ color:#8a8f98; font-size:.85rem; }}
-  table {{ width:100%; border-collapse:collapse; background:#1a1d24; border-radius:12px; overflow:hidden; }}
-  th,td {{ text-align:left; padding:12px 16px; border-bottom:1px solid #272b34; }}
-  th {{ color:#8a8f98; font-weight:600; font-size:.85rem; }}
-  .bar {{ display:inline-block; width:120px; height:8px; background:#272b34; border-radius:4px; margin-right:8px; vertical-align:middle; }}
-  .bar span {{ display:block; height:100%; background:#5b8def; border-radius:4px; }}
-  .empty {{ color:#8a8f98; text-align:center; }}
-</style></head>
-<body>
-  <h1>📈 Asistente de Carrera — Métricas</h1>
-  <div class="sub">Datos en vivo desde MongoDB</div>
-  <div class="cards">
-    <div class="card"><div class="n">{m['usuarios']}</div><div class="l">Usuarios</div></div>
-    <div class="card"><div class="n">{pct}%</div><div class="l">Onboarding completo</div></div>
-    <div class="card"><div class="n">{m['puntos_totales']}</div><div class="l">Puntos totales</div></div>
-    <div class="card"><div class="n">{m['racha_maxima']}</div><div class="l">Racha máxima</div></div>
-  </div>
-  <table>
-    <thead><tr><th>Especialidad</th><th>Usuarios</th><th>Score prom.</th><th>Puntos prom.</th></tr></thead>
-    <tbody>{filas}</tbody>
-  </table>
-</body></html>"""
-    return html
-
-
-@app.get("/becas")
-def becas():
-    """GET /becas?especialidad=datos-ia&carrera=sistemas&limit=5
-
-    Filtra y ordena por relevancia para la especialidad; carrera es secundaria.
-    """
-    especialidad = request.args.get("especialidad", "").strip()
-    carrera = request.args.get("carrera", "").strip()
-    limit = min(int(request.args.get("limit", 5)), 10)
-    if not especialidad and not carrera:
-        return jsonify({"error": "Falta 'especialidad' o 'carrera'"}), 400
-    resultado = filtrar_becas(especialidad, carrera, limit)
-    return jsonify({"becas": resultado, "total": len(resultado)})
-
-
-# ---------------------------------------------------------------------------
-# Cron semanal (cada lunes a las 6 AM) — re-scrapea todas las especialidades
-# ---------------------------------------------------------------------------
-
-def _weekly_scrape():
-    todas = list_especialidades()
-    print(f"[CRON] Semanal: {len(todas)} especialidades a scrapear")
-    for esp in todas:
-        try:
-            data = scrape_occ(esp)
-            save_ranking(esp, data)
-            print(f"  [CRON] OK {esp}")
-        except Exception as e:
-            print(f"  [CRON] ERROR {esp}: {e}")
-
-
-_scheduler = BackgroundScheduler()
-_scheduler.add_job(_weekly_scrape, "cron", day_of_week="mon", hour=6, minute=0)
-_scheduler.start()
-atexit.register(lambda: _scheduler.shutdown())
-
-
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    port = int(os.getenv("SCRAPER_PORT", 5001))
-    print(f"[SCRAPER] Iniciando en http://localhost:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
-````
-
 ## File: scraper/scraper.py
 ````python
 import time
@@ -3631,6 +3546,324 @@ def scrape_occ(especialidad: str, max_pages: int = 2) -> dict:
     }
 ````
 
+## File: scraper/app.py
+````python
+import atexit
+import os
+from datetime import datetime, timezone, timedelta
+from flask import Flask, jsonify, request
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
+
+from scraper import scrape_occ, SEED_DATA, DEFAULT_SEED
+from models import save_ranking, get_ranking, list_especialidades, metricas
+from becas import filtrar_becas
+
+load_dotenv()
+
+app = Flask(__name__)
+
+# Secreto compartido con el bot Node. Si está vacío, la auth queda desactivada
+# (cómodo en local); en producción ponlo en ambos .env.
+API_SECRET_KEY = os.getenv("API_SECRET_KEY", "").strip()
+
+
+@app.before_request
+def _check_api_key():
+    """Valida el header X-API-Key en todos los endpoints menos /health.
+
+    Solo se exige si API_SECRET_KEY está configurada; así local sigue simple.
+    """
+    if not API_SECRET_KEY or request.path == "/health":
+        return None
+    # Acepta la key por header (bot) o por query param ?key= (dashboard en navegador)
+    provided = request.headers.get("X-API-Key", "") or request.args.get("key", "")
+    if provided != API_SECRET_KEY:
+        return jsonify({"error": "No autorizado"}), 401
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.get("/skills")
+def skills():
+    """GET /skills?especialidad=datos-ia&limit=5"""
+    especialidad = request.args.get("especialidad", "").strip()
+    limit = min(int(request.args.get("limit", 5)), 20)
+
+    if not especialidad:
+        return jsonify({"error": "Falta el parámetro 'especialidad'"}), 400
+
+    data = get_ranking(especialidad, limit)
+    if not data:
+        # Sin ranking guardado: responde con datos semilla (siempre hay algo).
+        # Así /miCV, /simular y /comparar funcionan sin correr /mercado antes.
+        seed = SEED_DATA.get(especialidad.lower().strip(), DEFAULT_SEED)
+        data = {
+            "especialidad": especialidad.lower(),
+            "skills": seed[:limit],
+            "total_jobs": 100,
+            "updatedAt": None,
+            "source": "seed",
+        }
+
+    return jsonify(data)
+
+
+# Tiempo que se consideran "frescos" los datos antes de re-scrapear
+CACHE_HOURS = 24
+
+
+def _is_fresh(updated_at_iso: str) -> bool:
+    """True si la fecha ISO es de hace menos de CACHE_HOURS."""
+    try:
+        updated = datetime.fromisoformat(updated_at_iso)
+        if updated.tzinfo is None:
+            updated = updated.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - updated < timedelta(hours=CACHE_HOURS)
+    except (ValueError, TypeError):
+        return False
+
+
+@app.post("/scrape")
+def scrape():
+    """POST /scrape  body: { "especialidad": "datos-ia" }
+
+    Si ya hay datos de hace menos de 24h, no vuelve a scrapear (responde cached).
+    """
+    body = request.get_json(silent=True) or {}
+    especialidad = body.get("especialidad", "").strip()
+
+    if not especialidad:
+        return jsonify({"error": "Falta 'especialidad' en el body"}), 400
+
+    # Cache hit: datos frescos en MongoDB, evita el scrape (responde en <1s)
+    existing = get_ranking(especialidad, limit=1)
+    if existing and _is_fresh(existing.get("updatedAt")):
+        print(f"[SCRAPE] Cache hit para '{especialidad}' (datos de <{CACHE_HOURS}h)")
+        return jsonify({"ok": True, "especialidad": especialidad, "cached": True})
+
+    print(f"[SCRAPE] Scrapeando para: {especialidad}")
+    data = scrape_occ(especialidad)
+    save_ranking(especialidad, data)
+    print(f"[SCRAPE] Guardado: {len(data['skills'])} skills para '{especialidad}'")
+
+    return jsonify({
+        "ok": True,
+        "especialidad": especialidad,
+        "cached": False,
+        "skills_found": len(data["skills"]),
+    })
+
+
+@app.get("/especialidades")
+def especialidades():
+    return jsonify({"especialidades": list_especialidades()})
+
+
+# --- Dashboard de métricas --------------------------------------------------
+
+ESP_LABEL = {
+    "desarrollo-web": "🌐 Desarrollo Web",
+    "datos-ia": "📊 Datos e IA",
+    "ciberseguridad": "🔐 Ciberseguridad",
+    "devops-cloud": "☁️ DevOps y Cloud",
+    "redes": "🖧 Redes",
+}
+
+
+@app.get("/metrics")
+def metrics():
+    """Métricas de uso en JSON (para scripts/monitoreo)."""
+    return jsonify(metricas())
+
+
+@app.get("/dashboard")
+def dashboard():
+    """Dashboard HTML simple (server-rendered, sin JS)."""
+    m = metricas()
+    pct = round(m["onboarding_completos"] / m["usuarios"] * 100) if m["usuarios"] else 0
+    max_users = max((e["usuarios"] for e in m["especialidades"]), default=1) or 1
+
+    filas = ""
+    for e in m["especialidades"]:
+        label = ESP_LABEL.get(e["especialidad"], e["especialidad"])
+        ancho = round(e["usuarios"] / max_users * 100)
+        filas += f"""
+        <tr>
+          <td>{label}</td>
+          <td><div class="bar"><span style="width:{ancho}%"></span></div>{e['usuarios']}</td>
+          <td>{e['score_prom']}%</td>
+          <td>{e['puntos_prom']}</td>
+        </tr>"""
+
+    if not filas:
+        filas = '<tr><td colspan="4" class="empty">Aún no hay perfiles con especialidad.</td></tr>'
+
+    html = f"""<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asistente de Carrera — Métricas</title>
+<style>
+  body {{ font-family: system-ui, sans-serif; background:#0f1115; color:#e6e6e6; margin:0; padding:32px; }}
+  h1 {{ font-size:1.4rem; margin:0 0 4px; }}
+  .sub {{ color:#8a8f98; margin-bottom:24px; }}
+  .cards {{ display:flex; flex-wrap:wrap; gap:16px; margin-bottom:28px; }}
+  .card {{ background:#1a1d24; border:1px solid #272b34; border-radius:12px; padding:18px 22px; min-width:140px; }}
+  .card .n {{ font-size:2rem; font-weight:700; }}
+  .card .l {{ color:#8a8f98; font-size:.85rem; }}
+  table {{ width:100%; border-collapse:collapse; background:#1a1d24; border-radius:12px; overflow:hidden; }}
+  th,td {{ text-align:left; padding:12px 16px; border-bottom:1px solid #272b34; }}
+  th {{ color:#8a8f98; font-weight:600; font-size:.85rem; }}
+  .bar {{ display:inline-block; width:120px; height:8px; background:#272b34; border-radius:4px; margin-right:8px; vertical-align:middle; }}
+  .bar span {{ display:block; height:100%; background:#5b8def; border-radius:4px; }}
+  .empty {{ color:#8a8f98; text-align:center; }}
+</style></head>
+<body>
+  <h1>📈 Asistente de Carrera — Métricas</h1>
+  <div class="sub">Datos en vivo desde MongoDB</div>
+  <div class="cards">
+    <div class="card"><div class="n">{m['usuarios']}</div><div class="l">Usuarios</div></div>
+    <div class="card"><div class="n">{pct}%</div><div class="l">Onboarding completo</div></div>
+    <div class="card"><div class="n">{m['puntos_totales']}</div><div class="l">Puntos totales</div></div>
+    <div class="card"><div class="n">{m['racha_maxima']}</div><div class="l">Racha máxima</div></div>
+  </div>
+  <table>
+    <thead><tr><th>Especialidad</th><th>Usuarios</th><th>Score prom.</th><th>Puntos prom.</th></tr></thead>
+    <tbody>{filas}</tbody>
+  </table>
+</body></html>"""
+    return html
+
+
+@app.get("/becas")
+def becas():
+    """GET /becas?especialidad=datos-ia&carrera=sistemas&limit=5
+
+    Filtra y ordena por relevancia para la especialidad; carrera es secundaria.
+    """
+    especialidad = request.args.get("especialidad", "").strip()
+    carrera = request.args.get("carrera", "").strip()
+    limit = min(int(request.args.get("limit", 5)), 10)
+    if not especialidad and not carrera:
+        return jsonify({"error": "Falta 'especialidad' o 'carrera'"}), 400
+    resultado = filtrar_becas(especialidad, carrera, limit)
+    return jsonify({"becas": resultado, "total": len(resultado)})
+
+
+# ---------------------------------------------------------------------------
+# Cron semanal (cada lunes a las 6 AM) — re-scrapea todas las especialidades
+# ---------------------------------------------------------------------------
+
+def _weekly_scrape():
+    todas = list_especialidades()
+    print(f"[CRON] Semanal: {len(todas)} especialidades a scrapear")
+    for esp in todas:
+        try:
+            data = scrape_occ(esp)
+            save_ranking(esp, data)
+            print(f"  [CRON] OK {esp}")
+        except Exception as e:
+            print(f"  [CRON] ERROR {esp}: {e}")
+
+
+_scheduler = BackgroundScheduler()
+_scheduler.add_job(_weekly_scrape, "cron", day_of_week="mon", hour=6, minute=0)
+_scheduler.start()
+atexit.register(lambda: _scheduler.shutdown())
+
+
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    port = int(os.getenv("SCRAPER_PORT", 5001))
+    print(f"[SCRAPER] Iniciando en http://localhost:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
+````
+
+## File: docs/contexto/glosario.md
+````markdown
+# Glosario
+
+## Entidades del dominio
+
+| Término | Definición |
+|---------|-----------|
+| **Perfil** | Documento MongoDB que representa a un estudiante. Contiene sus datos personales, habilidades, horario, estado de conversación e historial de scores. Una sola colección: `profiles`. |
+| **Carrera** | String libre que el usuario escribe durante el onboarding. Ej: `"ing en sistemas computacionales"`. Es secundaria: la **especialidad** es la que dirige el bot. |
+| **Especialidad** | La "capa de precisión" entre carrera y todo lo demás. Una de 5 keys kebab-case: `desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`, `redes`. Dirige mercado, CV, plan y becas. Definida en `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP`/`SEED_DATA` (Python) — **contrato compartido, las keys deben coincidir**. |
+| **Objetivo** | Tipo de empresa donde quiere trabajar (opcional): `startup`, `corporativo`, `gobierno`, `freelance`, `emprendimiento`. Afina el plan. |
+| **Nivel** | Nivel técnico autopercibido (3 puntos): `principiante`, `intermedio`, `avanzado`. Ajusta la dificultad del plan. |
+| **Habilidades** | Array de strings que el usuario declara tener. Ej: `["JavaScript", "SQL", "Git"]`. Se normalizan con `ALIASES` antes de comparar con el mercado. |
+| **Horario** | Mapa `{ dia: "HH:MM-HH:MM" }` de disponibilidad semanal del estudiante. Se usa para personalizar el plan de estudios. Ej: `{ lunes: "19:00-21:00" }`. |
+| **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
+| **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
+| **Puntos / Racha / Nivel** | Gamificación (`gamificacion.js`). Puntos: +10 por acierto en `/quiz`, +50 por check-in semanal "sí". Nivel = puntos/100. Racha = semanas consecutivas completando el check-in (0 al fallar). |
+| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
+| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
+
+## Siglas y abreviaciones internas
+
+| Sigla | Significado |
+|-------|------------|
+| **FSM** | Finite State Machine — máquina de estados finita que guía el onboarding conversacional |
+| **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
+| **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
+| **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
+| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
+| **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
+| **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
+| **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
+
+## Estados de la conversación (FSM)
+
+| Estado | Qué espera el bot |
+|--------|------------------|
+| `NEW` | Usuario recién creado, no ha empezado |
+| `ASK_NOMBRE` | Nombre del estudiante |
+| `ASK_CARRERA` | Carrera que estudia |
+| `ASK_ESPECIALIDAD` | Especialidad (menú numerado, dirige el bot) |
+| `ASK_OBJETIVO` | Tipo de empresa (opcional, 0 = saltar) |
+| `ASK_SEMESTRE` | Semestre actual (1-14) |
+| `ASK_PROMEDIO` | Promedio (0-10) |
+| `ASK_HABILIDADES` | Skills separadas por coma |
+| `ASK_NIVEL` | Nivel autopercibido (3 puntos) |
+| `ASK_HORARIO` | Días y rangos horarios |
+| `DONE` | Onboarding completo |
+| `EDIT_HABILIDADES` | Edición puntual de skills (vuelve a DONE) |
+| `EDIT_HORARIO` | Edición puntual de horario (vuelve a DONE) |
+| `EDIT_ESPECIALIDAD` | Edición/migración de especialidad (vuelve a DONE) |
+| `CV_ASK_PROYECTOS` → `CV_ASK_LOGROS` → `CV_ASK_LINKS` → `CV_ASK_EMAIL` | Mini-flujo de `/cv`; el último genera el PDF y vuelve a DONE |
+| `ENTREVISTA` | Entrevista en curso; cada texto es una respuesta evaluada por Groq (estado de preguntas en memoria, `entrevista.js`) |
+
+## Comandos del bot
+
+| Comando | Función |
+|---------|---------|
+| `/start` | Inicia o reinicia el onboarding |
+| `/perfil` | Muestra el perfil guardado |
+| `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
+| `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
+| `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
+| `/mercado` | Top 5 skills más pedidas para la carrera |
+| `/miCV` | Score de compatibilidad CV vs mercado |
+| `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
+| `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
+| `/puntos` | Puntos, nivel y racha semanal (gamificación) |
+| `/plan` | Plan de estudios de 8 semanas con Groq |
+| `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
+| `/entrevista` | Entrevista técnica simulada: preguntas abiertas evaluadas por IA |
+| `/becas` | Becas filtradas por carrera con días restantes |
+| `/progreso` | Gráfica ASCII del historial de scores |
+| `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
+````
+
 ## File: docs/contexto/arquitectura.md
 ````markdown
 # Arquitectura
@@ -3667,6 +3900,8 @@ asistente/
 │       ├── cv_generator.js # ARMA el CV: mini-flujo /cv + Groq + PDF (PDFKit)
 │       ├── planner.js     # Llama a Groq API para generar el plan
 │       ├── quiz.js        # Quiz interactivo (Groq + Zod, estado en memoria)
+│       ├── entrevista.js  # Entrevista simulada (preguntas abiertas evaluadas por Groq)
+│       ├── gamificacion.js # Puntos, nivel y racha
 │       ├── progreso.js    # Gráfica ASCII del historial de scores
 │       └── scheduler.js   # Crons: check-in semanal + re-score mensual
 ├── scraper/               # API Python (puerto 5001)
@@ -3758,81 +3993,6 @@ capturando una rebanada más realista del mercado que un solo slug.
 - Variables de entorno en producción cloud (Railway no configurado todavía)
 ````
 
-## File: docs/contexto/glosario.md
-````markdown
-# Glosario
-
-## Entidades del dominio
-
-| Término | Definición |
-|---------|-----------|
-| **Perfil** | Documento MongoDB que representa a un estudiante. Contiene sus datos personales, habilidades, horario, estado de conversación e historial de scores. Una sola colección: `profiles`. |
-| **Carrera** | String libre que el usuario escribe durante el onboarding. Ej: `"ing en sistemas computacionales"`. Es secundaria: la **especialidad** es la que dirige el bot. |
-| **Especialidad** | La "capa de precisión" entre carrera y todo lo demás. Una de 5 keys kebab-case: `desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`, `redes`. Dirige mercado, CV, plan y becas. Definida en `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP`/`SEED_DATA` (Python) — **contrato compartido, las keys deben coincidir**. |
-| **Objetivo** | Tipo de empresa donde quiere trabajar (opcional): `startup`, `corporativo`, `gobierno`, `freelance`, `emprendimiento`. Afina el plan. |
-| **Nivel** | Nivel técnico autopercibido (3 puntos): `principiante`, `intermedio`, `avanzado`. Ajusta la dificultad del plan. |
-| **Habilidades** | Array de strings que el usuario declara tener. Ej: `["JavaScript", "SQL", "Git"]`. Se normalizan con `ALIASES` antes de comparar con el mercado. |
-| **Horario** | Mapa `{ dia: "HH:MM-HH:MM" }` de disponibilidad semanal del estudiante. Se usa para personalizar el plan de estudios. Ej: `{ lunes: "19:00-21:00" }`. |
-| **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
-| **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
-| **Puntos / Racha / Nivel** | Gamificación (`gamificacion.js`). Puntos: +10 por acierto en `/quiz`, +50 por check-in semanal "sí". Nivel = puntos/100. Racha = semanas consecutivas completando el check-in (0 al fallar). |
-| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
-| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
-
-## Siglas y abreviaciones internas
-
-| Sigla | Significado |
-|-------|------------|
-| **FSM** | Finite State Machine — máquina de estados finita que guía el onboarding conversacional |
-| **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
-| **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
-| **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
-| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
-| **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
-| **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
-| **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
-
-## Estados de la conversación (FSM)
-
-| Estado | Qué espera el bot |
-|--------|------------------|
-| `NEW` | Usuario recién creado, no ha empezado |
-| `ASK_NOMBRE` | Nombre del estudiante |
-| `ASK_CARRERA` | Carrera que estudia |
-| `ASK_ESPECIALIDAD` | Especialidad (menú numerado, dirige el bot) |
-| `ASK_OBJETIVO` | Tipo de empresa (opcional, 0 = saltar) |
-| `ASK_SEMESTRE` | Semestre actual (1-14) |
-| `ASK_PROMEDIO` | Promedio (0-10) |
-| `ASK_HABILIDADES` | Skills separadas por coma |
-| `ASK_NIVEL` | Nivel autopercibido (3 puntos) |
-| `ASK_HORARIO` | Días y rangos horarios |
-| `DONE` | Onboarding completo |
-| `EDIT_HABILIDADES` | Edición puntual de skills (vuelve a DONE) |
-| `EDIT_HORARIO` | Edición puntual de horario (vuelve a DONE) |
-| `EDIT_ESPECIALIDAD` | Edición/migración de especialidad (vuelve a DONE) |
-| `CV_ASK_PROYECTOS` → `CV_ASK_LOGROS` → `CV_ASK_LINKS` → `CV_ASK_EMAIL` | Mini-flujo de `/cv`; el último genera el PDF y vuelve a DONE |
-
-## Comandos del bot
-
-| Comando | Función |
-|---------|---------|
-| `/start` | Inicia o reinicia el onboarding |
-| `/perfil` | Muestra el perfil guardado |
-| `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
-| `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
-| `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
-| `/mercado` | Top 5 skills más pedidas para la carrera |
-| `/miCV` | Score de compatibilidad CV vs mercado |
-| `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
-| `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
-| `/puntos` | Puntos, nivel y racha semanal (gamificación) |
-| `/plan` | Plan de estudios de 8 semanas con Groq |
-| `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
-| `/becas` | Becas filtradas por carrera con días restantes |
-| `/progreso` | Gráfica ASCII del historial de scores |
-| `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
-````
-
 ## File: src/index.js
 ````javascript
 import { Telegraf } from 'telegraf';
@@ -3857,6 +4017,7 @@ import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client
 import { ESPECIALIDADES } from './bot/especialidades.js';
 import { iniciarQuiz, responderQuiz } from './bot/quiz.js';
 import { otorgarPuntos, actualizarRacha, formatPuntos } from './bot/gamificacion.js';
+import { iniciarEntrevista, responderEntrevista } from './bot/entrevista.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -4287,6 +4448,27 @@ bot.command('quiz', async (ctx) => {
 // Respuestas del quiz (botones inline: data "quiz:<pregunta>:<opcion>")
 bot.action(/^quiz:(\d+):(\d+)$/, responderQuiz);
 
+// /entrevista — entrevista técnica simulada (preguntas abiertas evaluadas por IA)
+bot.command('entrevista', async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  if (isRateLimited(ctx.from.id, 'entrevista', 30)) {
+    return ctx.reply('Espera unos segundos antes de otra entrevista ⏳');
+  }
+  if (!(await requireEspecialidad(ctx, profile))) return;
+
+  await ctx.sendChatAction('typing');
+  await ctx.reply('🎤 Preparando tu entrevista simulada...');
+  try {
+    await iniciarEntrevista(ctx, profile);
+  } catch (err) {
+    logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /entrevista');
+    await ctx.reply('No pude iniciar la entrevista ahora. Intenta de nuevo en un momento.');
+  }
+});
+
 // /puntos — estado de gamificación (puntos, nivel, racha)
 bot.command('puntos', async (ctx) => {
   const profile = await Profile.findOne({ telegramId: ctx.from.id });
@@ -4361,6 +4543,11 @@ async function generarYEnviarCV(ctx, profile) {
 bot.on('text', async (ctx) => {
   const profile = await getOrCreateProfile(ctx);
   const state = profile.conversationState;
+
+  // Entrevista en curso: el texto es la respuesta a la pregunta actual
+  if (state === STATES.ENTREVISTA) {
+    return responderEntrevista(ctx, profile, ctx.message.text);
+  }
 
   // Si no esta en medio del onboarding, guialo
   if (state === STATES.NEW || state === STATES.DONE) {

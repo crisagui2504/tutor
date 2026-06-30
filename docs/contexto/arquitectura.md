@@ -32,6 +32,8 @@ asistente/
 │       ├── cv_generator.js # ARMA el CV: mini-flujo /cv + Groq + PDF (PDFKit)
 │       ├── planner.js     # Llama a Groq API para generar el plan
 │       ├── quiz.js        # Quiz interactivo (Groq + Zod, estado en memoria)
+│       ├── entrevista.js  # Entrevista simulada (preguntas abiertas evaluadas por Groq)
+│       ├── gamificacion.js # Puntos, nivel y racha
 │       ├── progreso.js    # Gráfica ASCII del historial de scores
 │       └── scheduler.js   # Crons: check-in semanal + re-score mensual
 ├── scraper/               # API Python (puerto 5001)

@@ -33,4 +33,8 @@ export const STATES = {
   CV_ASK_LOGROS: 'CV_ASK_LOGROS',
   CV_ASK_LINKS: 'CV_ASK_LINKS',
   CV_ASK_EMAIL: 'CV_ASK_EMAIL',
+
+  // Entrevista simulada (/entrevista): el usuario responde texto libre y Groq
+  // evalúa cada respuesta. Las preguntas viven en memoria (entrevista.js).
+  ENTREVISTA: 'ENTREVISTA',
 };

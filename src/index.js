@@ -20,6 +20,7 @@ import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client
 import { ESPECIALIDADES } from './bot/especialidades.js';
 import { iniciarQuiz, responderQuiz } from './bot/quiz.js';
 import { otorgarPuntos, actualizarRacha, formatPuntos } from './bot/gamificacion.js';
+import { iniciarEntrevista, responderEntrevista } from './bot/entrevista.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -450,6 +451,27 @@ bot.command('quiz', async (ctx) => {
 // Respuestas del quiz (botones inline: data "quiz:<pregunta>:<opcion>")
 bot.action(/^quiz:(\d+):(\d+)$/, responderQuiz);
 
+// /entrevista — entrevista técnica simulada (preguntas abiertas evaluadas por IA)
+bot.command('entrevista', async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  if (isRateLimited(ctx.from.id, 'entrevista', 30)) {
+    return ctx.reply('Espera unos segundos antes de otra entrevista ⏳');
+  }
+  if (!(await requireEspecialidad(ctx, profile))) return;
+
+  await ctx.sendChatAction('typing');
+  await ctx.reply('🎤 Preparando tu entrevista simulada...');
+  try {
+    await iniciarEntrevista(ctx, profile);
+  } catch (err) {
+    logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /entrevista');
+    await ctx.reply('No pude iniciar la entrevista ahora. Intenta de nuevo en un momento.');
+  }
+});
+
 // /puntos — estado de gamificación (puntos, nivel, racha)
 bot.command('puntos', async (ctx) => {
   const profile = await Profile.findOne({ telegramId: ctx.from.id });
@@ -524,6 +546,11 @@ async function generarYEnviarCV(ctx, profile) {
 bot.on('text', async (ctx) => {
   const profile = await getOrCreateProfile(ctx);
   const state = profile.conversationState;
+
+  // Entrevista en curso: el texto es la respuesta a la pregunta actual
+  if (state === STATES.ENTREVISTA) {
+    return responderEntrevista(ctx, profile, ctx.message.text);
+  }
 
   // Si no esta en medio del onboarding, guialo
   if (state === STATES.NEW || state === STATES.DONE) {

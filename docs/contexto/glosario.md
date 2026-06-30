@@ -49,6 +49,7 @@
 | `EDIT_HORARIO` | Edición puntual de horario (vuelve a DONE) |
 | `EDIT_ESPECIALIDAD` | Edición/migración de especialidad (vuelve a DONE) |
 | `CV_ASK_PROYECTOS` → `CV_ASK_LOGROS` → `CV_ASK_LINKS` → `CV_ASK_EMAIL` | Mini-flujo de `/cv`; el último genera el PDF y vuelve a DONE |
+| `ENTREVISTA` | Entrevista en curso; cada texto es una respuesta evaluada por Groq (estado de preguntas en memoria, `entrevista.js`) |
 
 ## Comandos del bot
 
@@ -66,6 +67,7 @@
 | `/puntos` | Puntos, nivel y racha semanal (gamificación) |
 | `/plan` | Plan de estudios de 8 semanas con Groq |
 | `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
+| `/entrevista` | Entrevista técnica simulada: preguntas abiertas evaluadas por IA |
 | `/becas` | Becas filtradas por carrera con días restantes |
 | `/progreso` | Gráfica ASCII del historial de scores |
 | `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |

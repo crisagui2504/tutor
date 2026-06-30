@@ -29,6 +29,11 @@ const profileSchema = new mongoose.Schema(
     promedio: { type: Number },
     habilidades: { type: [String], default: [] },
 
+    // Gamificación (puntos + racha semanal)
+    puntos: { type: Number, default: 0 },
+    racha: { type: Number, default: 0 },
+    ultimaActividad: { type: Date },
+
     // Datos extra para el CV (los pregunta /cv, no el onboarding)
     email: { type: String },
     github: { type: String },

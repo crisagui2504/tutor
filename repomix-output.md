@@ -59,6 +59,7 @@ scraper/scraper.py
 src/bot/cv_generator.js
 src/bot/cv_matcher.js
 src/bot/especialidades.js
+src/bot/gamificacion.js
 src/bot/onboarding.js
 src/bot/planner.js
 src/bot/progreso.js
@@ -75,165 +76,69 @@ src/models/profile.js
 
 # Files
 
-## File: src/bot/quiz.js
+## File: src/bot/gamificacion.js
 ````javascript
-import { Markup } from 'telegraf';
-import { z } from 'zod';
-import { config } from '../config.js';
-import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
-
 /**
- * Quiz semanal interactivo. En vez de entregar el plan como un bloque grande de
- * texto, refuerza el aprendizaje con preguntas cortas de opción múltiple y
- * feedback inmediato (el patrón que el paper IJCRT asocia a ~90% de finalización).
+ * Sistema de puntos y racha. Cierra el loop de engagement: el /quiz y el check-in
+ * semanal otorgan puntos; mantener actividad semana a semana sube la racha.
  *
- * El estado del quiz en curso vive en memoria (Map por usuario): es efímero
- * (~1 min) y si el bot reinicia, el usuario simplemente hace /quiz de nuevo.
- */
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
-const LETRAS = ['A', 'B', 'C', 'D'];
-
-const quizzes = new Map();
-
-const QUIZ_SCHEMA = z.object({
-  preguntas: z
-    .array(
-      z.object({
-        pregunta: z.string().min(1),
-        opciones: z.array(z.string().min(1)).length(4),
-        correcta: z.number().int().min(0).max(3),
-        explicacion: z.string().default(''),
-      })
-    )
-    .min(1),
-});
-
-/**
- * Genera un quiz con Groq sobre los temas dados. Lanza si Groq falla o el JSON
- * no cumple el esquema (el caller decide cómo avisar al usuario).
+ * - Puntos: acumulables, definen el nivel (cada 100 puntos = 1 nivel).
+ * - Racha: semanas consecutivas completando el check-in (se reinicia al fallar).
  *
- * @param {object} profile
- * @param {string[]} temas - skills sobre las que preguntar
+ * Todas las funciones MUTAN el profile en memoria; el caller hace save().
  */
-export async function generarQuiz(profile, temas) {
-  const especialidad = profile.especialidad
-    ? labelDe(profile.especialidad, ESPECIALIDADES)
-    : 'tecnología';
-  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'principiante';
+const PUNTOS_POR_NIVEL = 100;
 
-  const prompt = `Eres instructor de ${especialidad}. Genera un quiz de 3 preguntas de opción múltiple (4 opciones cada una) para un estudiante nivel ${nivel}, para reforzar: ${temas.join(', ')}.
+export function nivel(puntos) {
+  return Math.floor((puntos || 0) / PUNTOS_POR_NIVEL) + 1;
+}
 
-Devuelve SOLO JSON con esta forma exacta:
-{ "preguntas": [ { "pregunta": "...", "opciones": ["a","b","c","d"], "correcta": 0, "explicacion": "1 frase corta" } ] }
-
-Reglas: preguntas prácticas y concretas (no triviales), en español. "correcta" es el índice (0-3) de la opción correcta. Las 4 opciones plausibles.`;
-
-  const res = await fetch(GROQ_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.groqKey}`,
-    },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.6,
-      max_tokens: 1200,
-      response_format: { type: 'json_object' },
-    }),
-  });
-  if (!res.ok) throw new Error(`Groq ${res.status}`);
-
-  const data = await res.json();
-  const raw = data.choices?.[0]?.message?.content ?? '';
-  const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
-
-  const result = QUIZ_SCHEMA.safeParse(json);
-  if (!result.success) {
-    throw new Error(`Quiz inválido: ${result.error.issues[0]?.message}`);
-  }
-  return result.data;
+function progresoNivel(puntos) {
+  return (puntos || 0) % PUNTOS_POR_NIVEL; // 0-99
 }
 
 /**
- * Renderiza la pregunta actual con botones A/B/C/D. Texto plano (sin Markdown)
- * para no romper el parser con asteriscos/guiones del contenido de Groq.
+ * Suma puntos al perfil. Devuelve el total y si subió de nivel.
  */
-function enviarPregunta(ctx, estado) {
-  const q = estado.preguntas[estado.actual];
-  const texto =
-    `❓ Pregunta ${estado.actual + 1}/${estado.preguntas.length}\n\n` +
-    `${q.pregunta}\n\n` +
-    q.opciones.map((o, i) => `${LETRAS[i]}) ${o}`).join('\n');
+export function otorgarPuntos(profile, cantidad) {
+  const nivelAntes = nivel(profile.puntos);
+  profile.puntos = (profile.puntos || 0) + cantidad;
+  const nivelDespues = nivel(profile.puntos);
+  return {
+    total: profile.puntos,
+    subioNivel: nivelDespues > nivelAntes,
+    nivel: nivelDespues,
+  };
+}
 
-  const botones = q.opciones.map((_, i) =>
-    Markup.button.callback(LETRAS[i], `quiz:${estado.actual}:${i}`)
+/**
+ * Actualiza la racha semanal: +1 si hubo actividad, 0 si se rompió.
+ */
+export function actualizarRacha(profile, exito) {
+  profile.racha = exito ? (profile.racha || 0) + 1 : 0;
+  profile.ultimaActividad = new Date();
+  return profile.racha;
+}
+
+/**
+ * Mensaje de estado de gamificación para /puntos (Markdown).
+ */
+export function formatPuntos(profile) {
+  const puntos = profile.puntos || 0;
+  const nv = nivel(puntos);
+  const prog = progresoNivel(puntos);
+  const llenos = Math.round(prog / 10);
+  const barra = '█'.repeat(llenos) + '░'.repeat(10 - llenos);
+  const racha = profile.racha || 0;
+  const fuego = racha > 0 ? '🔥'.repeat(Math.min(racha, 5)) : '🥶';
+
+  return (
+    '🏆 *Tu progreso*\n\n' +
+    `⭐ Puntos: *${puntos}*\n` +
+    `📊 Nivel *${nv}*   \`${barra}\`   ${prog}/100\n` +
+    `${fuego} Racha: *${racha}* semana(s)\n\n` +
+    'Gana puntos con /quiz y completando tu check-in semanal de los lunes.'
   );
-  return ctx.reply(texto, Markup.inlineKeyboard(botones, { columns: 4 }));
-}
-
-/**
- * Inicia un quiz: genera, guarda el estado y envía la primera pregunta.
- */
-export async function iniciarQuiz(ctx, profile, temas) {
-  const quiz = await generarQuiz(profile, temas);
-  quizzes.set(ctx.from.id, { ...quiz, actual: 0, aciertos: 0 });
-  await enviarPregunta(ctx, quizzes.get(ctx.from.id));
-}
-
-/**
- * Maneja una respuesta (callback_query con data "quiz:<pregunta>:<opcion>").
- * Da feedback inmediato y avanza a la siguiente pregunta o cierra el quiz.
- */
-export async function responderQuiz(ctx) {
-  await ctx.answerCbQuery();
-  const estado = quizzes.get(ctx.from.id);
-  if (!estado) {
-    return ctx.reply('Tu quiz expiró 🙂 Usa /quiz para uno nuevo.');
-  }
-
-  const qIndex = Number(ctx.match[1]);
-  const elegido = Number(ctx.match[2]);
-  if (qIndex !== estado.actual) return; // respuesta vieja o doble tap: ignora
-
-  const q = estado.preguntas[qIndex];
-  const correcto = elegido === q.correcta;
-  if (correcto) estado.aciertos++;
-
-  const feedback =
-    `${q.pregunta}\n\n` +
-    (correcto
-      ? `✅ ¡Correcto! ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`
-      : `❌ Tu respuesta: ${LETRAS[elegido]}. La correcta era ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`) +
-    (q.explicacion ? `\n\n💡 ${q.explicacion}` : '');
-
-  // Reemplaza la pregunta por el feedback (quita los botones)
-  try {
-    await ctx.editMessageText(feedback);
-  } catch {
-    await ctx.reply(feedback);
-  }
-
-  estado.actual++;
-  if (estado.actual < estado.preguntas.length) {
-    await enviarPregunta(ctx, estado);
-  } else {
-    const total = estado.preguntas.length;
-    const aciertos = estado.aciertos;
-    quizzes.delete(ctx.from.id);
-    const animo =
-      aciertos === total
-        ? '¡Perfecto! 🔥'
-        : aciertos >= total / 2
-        ? '¡Bien! Vas por buen camino 💪'
-        : 'Sigue practicando, lo vas a dominar 🌱';
-    await ctx.reply(
-      `🎯 *Quiz terminado*\nAcertaste *${aciertos}/${total}*. ${animo}\n\n` +
-        'Usa /plan para seguir tu plan o /quiz para otra ronda.',
-      { parse_mode: 'Markdown' }
-    );
-  }
 }
 ````
 
@@ -1520,6 +1425,184 @@ export function generarGraficaProgreso(cvScores, especialidad) {
 }
 ````
 
+## File: src/bot/quiz.js
+````javascript
+import { Markup } from 'telegraf';
+import { z } from 'zod';
+import { config } from '../config.js';
+import { Profile } from '../models/profile.js';
+import { otorgarPuntos } from './gamificacion.js';
+import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+const PUNTOS_POR_ACIERTO = 10;
+
+/**
+ * Quiz semanal interactivo. En vez de entregar el plan como un bloque grande de
+ * texto, refuerza el aprendizaje con preguntas cortas de opción múltiple y
+ * feedback inmediato (el patrón que el paper IJCRT asocia a ~90% de finalización).
+ *
+ * El estado del quiz en curso vive en memoria (Map por usuario): es efímero
+ * (~1 min) y si el bot reinicia, el usuario simplemente hace /quiz de nuevo.
+ */
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const LETRAS = ['A', 'B', 'C', 'D'];
+
+const quizzes = new Map();
+
+const QUIZ_SCHEMA = z.object({
+  preguntas: z
+    .array(
+      z.object({
+        pregunta: z.string().min(1),
+        opciones: z.array(z.string().min(1)).length(4),
+        correcta: z.number().int().min(0).max(3),
+        explicacion: z.string().default(''),
+      })
+    )
+    .min(1),
+});
+
+/**
+ * Genera un quiz con Groq sobre los temas dados. Lanza si Groq falla o el JSON
+ * no cumple el esquema (el caller decide cómo avisar al usuario).
+ *
+ * @param {object} profile
+ * @param {string[]} temas - skills sobre las que preguntar
+ */
+export async function generarQuiz(profile, temas) {
+  const especialidad = profile.especialidad
+    ? labelDe(profile.especialidad, ESPECIALIDADES)
+    : 'tecnología';
+  const nivel = profile.nivel ? labelDe(profile.nivel, NIVELES) : 'principiante';
+
+  const prompt = `Eres instructor de ${especialidad}. Genera un quiz de 3 preguntas de opción múltiple (4 opciones cada una) para un estudiante nivel ${nivel}, para reforzar: ${temas.join(', ')}.
+
+Devuelve SOLO JSON con esta forma exacta:
+{ "preguntas": [ { "pregunta": "...", "opciones": ["a","b","c","d"], "correcta": 0, "explicacion": "1 frase corta" } ] }
+
+Reglas: preguntas prácticas y concretas (no triviales), en español. "correcta" es el índice (0-3) de la opción correcta. Las 4 opciones plausibles.`;
+
+  const res = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.groqKey}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.6,
+      max_tokens: 1200,
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}`);
+
+  const data = await res.json();
+  const raw = data.choices?.[0]?.message?.content ?? '';
+  const json = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1));
+
+  const result = QUIZ_SCHEMA.safeParse(json);
+  if (!result.success) {
+    throw new Error(`Quiz inválido: ${result.error.issues[0]?.message}`);
+  }
+  return result.data;
+}
+
+/**
+ * Renderiza la pregunta actual con botones A/B/C/D. Texto plano (sin Markdown)
+ * para no romper el parser con asteriscos/guiones del contenido de Groq.
+ */
+function enviarPregunta(ctx, estado) {
+  const q = estado.preguntas[estado.actual];
+  const texto =
+    `❓ Pregunta ${estado.actual + 1}/${estado.preguntas.length}\n\n` +
+    `${q.pregunta}\n\n` +
+    q.opciones.map((o, i) => `${LETRAS[i]}) ${o}`).join('\n');
+
+  const botones = q.opciones.map((_, i) =>
+    Markup.button.callback(LETRAS[i], `quiz:${estado.actual}:${i}`)
+  );
+  return ctx.reply(texto, Markup.inlineKeyboard(botones, { columns: 4 }));
+}
+
+/**
+ * Inicia un quiz: genera, guarda el estado y envía la primera pregunta.
+ */
+export async function iniciarQuiz(ctx, profile, temas) {
+  const quiz = await generarQuiz(profile, temas);
+  quizzes.set(ctx.from.id, { ...quiz, actual: 0, aciertos: 0 });
+  await enviarPregunta(ctx, quizzes.get(ctx.from.id));
+}
+
+/**
+ * Maneja una respuesta (callback_query con data "quiz:<pregunta>:<opcion>").
+ * Da feedback inmediato y avanza a la siguiente pregunta o cierra el quiz.
+ */
+export async function responderQuiz(ctx) {
+  await ctx.answerCbQuery();
+  const estado = quizzes.get(ctx.from.id);
+  if (!estado) {
+    return ctx.reply('Tu quiz expiró 🙂 Usa /quiz para uno nuevo.');
+  }
+
+  const qIndex = Number(ctx.match[1]);
+  const elegido = Number(ctx.match[2]);
+  if (qIndex !== estado.actual) return; // respuesta vieja o doble tap: ignora
+
+  const q = estado.preguntas[qIndex];
+  const correcto = elegido === q.correcta;
+  if (correcto) estado.aciertos++;
+
+  const feedback =
+    `${q.pregunta}\n\n` +
+    (correcto
+      ? `✅ ¡Correcto! ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`
+      : `❌ Tu respuesta: ${LETRAS[elegido]}. La correcta era ${LETRAS[q.correcta]}) ${q.opciones[q.correcta]}`) +
+    (q.explicacion ? `\n\n💡 ${q.explicacion}` : '');
+
+  // Reemplaza la pregunta por el feedback (quita los botones)
+  try {
+    await ctx.editMessageText(feedback);
+  } catch {
+    await ctx.reply(feedback);
+  }
+
+  estado.actual++;
+  if (estado.actual < estado.preguntas.length) {
+    await enviarPregunta(ctx, estado);
+  } else {
+    const total = estado.preguntas.length;
+    const aciertos = estado.aciertos;
+    quizzes.delete(ctx.from.id);
+    const animo =
+      aciertos === total
+        ? '¡Perfecto! 🔥'
+        : aciertos >= total / 2
+        ? '¡Bien! Vas por buen camino 💪'
+        : 'Sigue practicando, lo vas a dominar 🌱';
+
+    // Otorga puntos por aciertos (gamificación)
+    let extra = '';
+    const profile = await Profile.findOne({ telegramId: ctx.from.id });
+    if (profile) {
+      const ganados = aciertos * PUNTOS_POR_ACIERTO;
+      const r = otorgarPuntos(profile, ganados);
+      await profile.save();
+      extra = `\n⭐ +${ganados} puntos (total: ${r.total})`;
+      if (r.subioNivel) extra += `\n🎉 ¡Subiste al nivel ${r.nivel}!`;
+    }
+
+    await ctx.reply(
+      `🎯 *Quiz terminado*\nAcertaste *${aciertos}/${total}*. ${animo}${extra}\n\n` +
+        'Usa /plan para seguir tu plan o /puntos para ver tu progreso.',
+      { parse_mode: 'Markdown' }
+    );
+  }
+}
+````
+
 ## File: src/bot/scraper_client.js
 ````javascript
 import { config } from '../config.js';
@@ -1688,6 +1771,11 @@ const profileSchema = new mongoose.Schema(
     semestre: { type: Number },
     promedio: { type: Number },
     habilidades: { type: [String], default: [] },
+
+    // Gamificación (puntos + racha semanal)
+    puntos: { type: Number, default: 0 },
+    racha: { type: Number, default: 0 },
+    ultimaActividad: { type: Date },
 
     // Datos extra para el CV (los pregunta /cv, no el onboarding)
     email: { type: String },
@@ -2532,204 +2620,6 @@ export const config = {
 };
 ````
 
-## File: docs/contexto/arquitectura.md
-````markdown
-# Arquitectura
-
-## Stack
-
-| Capa | Tecnología | Versión mínima |
-|------|-----------|----------------|
-| Bot | Node.js + Telegraf.js | Node 20, Telegraf 4.x |
-| Scraper / API | Python + Flask | Python 3.11 |
-| Base de datos | MongoDB Atlas (tier M0) | pymongo 4.8 / mongoose 8.x |
-| LLM | Groq API (Llama 3.3 70B) | nube, compatible con OpenAI |
-| Scheduler Node | node-cron | 4.x |
-| Scheduler Python | APScheduler | 3.10 |
-| Logging Node | pino + pino-pretty | 9.x |
-| PDF (CV) | pdfkit (JS puro, Times-Roman built-in) | 0.15.x |
-
-## Mapa de carpetas
-
-```
-asistente/
-├── src/                   # Bot Node.js
-│   ├── index.js           # Entrypoint: comandos Telegraf, arranque
-│   ├── config.js          # Carga y valida variables de entorno (falla rápido)
-│   ├── logger.js          # Logger estructurado (pino, pretty en dev / JSON en prod)
-│   ├── db.js              # Conexión mongoose + fix DNS Google
-│   ├── models/
-│   │   └── profile.js     # Esquema perfil + estado conversación
-│   └── bot/
-│       ├── states.js      # Enum de estados de la FSM
-│       ├── especialidades.js # Taxonomía (especialidad/objetivo/nivel) — contrato con Python
-│       ├── onboarding.js  # Pasos del onboarding (prompt + handle)
-│       ├── cv_matcher.js  # COMPARA skills vs mercado (matchSkills, recordScore)
-│       ├── cv_generator.js # ARMA el CV: mini-flujo /cv + Groq + PDF (PDFKit)
-│       ├── planner.js     # Llama a Groq API para generar el plan
-│       ├── quiz.js        # Quiz interactivo (Groq + Zod, estado en memoria)
-│       ├── progreso.js    # Gráfica ASCII del historial de scores
-│       └── scheduler.js   # Crons: check-in semanal + re-score mensual
-├── scraper/               # API Python (puerto 5001)
-│   ├── app.py             # Flask: /health /skills /scrape /careers /becas
-│   ├── scraper.py         # Scrape OCC → fallback a SEED_DATA
-│   ├── extractor.py       # SKILLS_CATALOG + extract_skills() + rank_skills()
-│   ├── models.py          # pymongo: save_ranking / get_ranking / list_careers
-│   ├── becas.py           # SEED_BECAS + filtrar_becas()
-│   └── requirements.txt
-├── docs/contexto/         # Esta carpeta
-├── iniciar.bat            # Arranca ambos servicios con doble clic (Windows)
-├── Procfile               # worker: npm start (Railway)
-├── package.json           # ESM, scripts start/dev, dependencias
-└── .env / .env.example
-```
-
-## Flujo de datos por comando
-
-```
-/start      → FSM onboarding → guarda perfil en MongoDB
-
-/mercado    → POST /scrape (Python)
-               └── scrape_occ() → OCC o SEED_DATA
-               └── save_ranking() → MongoDB skill_rankings
-            → GET /skills → respuesta al usuario
-
-/miCV       → GET /skills
-            → matchSkills(profile.habilidades, skills)
-            → push score a profile.cvScores → guarda en MongoDB
-
-/plan       → GET /skills → extrae missing skills
-            → POST Groq /openai/v1/chat/completions (Llama 3.3 70B)
-            → respuesta al usuario
-
-/becas      → GET /becas (Python)
-            → filtrar_becas(carrera) sobre SEED_BECAS
-            → respuesta con semáforo de días
-
-/progreso   → lee profile.cvScores (últimos 6)
-            → generarGraficaProgreso() → gráfica ASCII
-
-Cron lunes 9AM  → sendWeeklyCheckin() → botones inline a todos los usuarios
-Cron día 1 mes  → monthlyRescore() → recalcula score, notifica si sube
-Cron lunes 6AM  → _weekly_scrape() (Python APScheduler) → re-scrapea OCC
-```
-
-## Colecciones MongoDB
-
-| Colección | Qué guarda |
-|-----------|-----------|
-| `profiles` | Un doc por usuario Telegram: perfil (incl. especialidad/objetivo/nivel) + estado FSM + historial de scores (con especialidad) |
-| `skill_rankings` | Un doc por **especialidad**: top skills + total_jobs + fecha de actualización |
-
-## Capa de especialidad (clave del diseño)
-
-`especialidad` es la "capa de precisión" entre la carrera (string libre) y el resto
-del bot. Las 5 keys (`desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`,
-`redes`) son un **contrato compartido** entre `src/bot/especialidades.js` (Node) y
-`ESPECIALIDAD_MAP` + `SEED_DATA` en `scraper/scraper.py` (Python). Cambiar una key
-exige tocar ambos lados. Todo (`/mercado`, `/miCV`, `/plan`, `/becas`, `/progreso`)
-se filtra por especialidad, no por carrera.
-
-Cada especialidad mapea a **varios títulos de OCC** (ej. `datos-ia` → data-scientist,
-analista-de-datos, data-engineer): `scrape_occ` itera sobre todos y combina los
-resultados (con `max_pages=2` por título para no disparar tiempo ni bloqueos),
-capturando una rebanada más realista del mercado que un solo slug.
-
-## API del scraper (contrato HTTP)
-
-| Endpoint | Parámetro clave |
-|----------|-----------------|
-| `POST /scrape` | body `{ especialidad }` (caché 24h) |
-| `GET /skills` | `?especialidad=&limit=` — nunca 404: si no hay ranking, cae a SEED_DATA |
-| `GET /becas` | `?especialidad=&carrera=&limit=` |
-| `GET /especialidades` | (lista las que tienen ranking) |
-
-## Qué NO existe
-
-- Tests (unitarios, integración o e2e)
-- Autenticación o autorización adicional (solo telegramId implícito)
-- Rate limiting en el bot o en la API Flask
-- Caché en memoria (Redis, etc.)
-- Google Calendar integration (mencionada en README, no implementada)
-- Panel de administración o dashboard
-- Logs estructurados / observabilidad (solo console.log / print)
-- Multilenguaje (solo español)
-- Variables de entorno en producción cloud (Railway no configurado todavía)
-````
-
-## File: docs/contexto/glosario.md
-````markdown
-# Glosario
-
-## Entidades del dominio
-
-| Término | Definición |
-|---------|-----------|
-| **Perfil** | Documento MongoDB que representa a un estudiante. Contiene sus datos personales, habilidades, horario, estado de conversación e historial de scores. Una sola colección: `profiles`. |
-| **Carrera** | String libre que el usuario escribe durante el onboarding. Ej: `"ing en sistemas computacionales"`. Es secundaria: la **especialidad** es la que dirige el bot. |
-| **Especialidad** | La "capa de precisión" entre carrera y todo lo demás. Una de 5 keys kebab-case: `desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`, `redes`. Dirige mercado, CV, plan y becas. Definida en `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP`/`SEED_DATA` (Python) — **contrato compartido, las keys deben coincidir**. |
-| **Objetivo** | Tipo de empresa donde quiere trabajar (opcional): `startup`, `corporativo`, `gobierno`, `freelance`, `emprendimiento`. Afina el plan. |
-| **Nivel** | Nivel técnico autopercibido (3 puntos): `principiante`, `intermedio`, `avanzado`. Ajusta la dificultad del plan. |
-| **Habilidades** | Array de strings que el usuario declara tener. Ej: `["JavaScript", "SQL", "Git"]`. Se normalizan con `ALIASES` antes de comparar con el mercado. |
-| **Horario** | Mapa `{ dia: "HH:MM-HH:MM" }` de disponibilidad semanal del estudiante. Se usa para personalizar el plan de estudios. Ej: `{ lunes: "19:00-21:00" }`. |
-| **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
-| **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
-| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
-| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
-
-## Siglas y abreviaciones internas
-
-| Sigla | Significado |
-|-------|------------|
-| **FSM** | Finite State Machine — máquina de estados finita que guía el onboarding conversacional |
-| **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
-| **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
-| **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
-| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
-| **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
-| **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
-| **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
-
-## Estados de la conversación (FSM)
-
-| Estado | Qué espera el bot |
-|--------|------------------|
-| `NEW` | Usuario recién creado, no ha empezado |
-| `ASK_NOMBRE` | Nombre del estudiante |
-| `ASK_CARRERA` | Carrera que estudia |
-| `ASK_ESPECIALIDAD` | Especialidad (menú numerado, dirige el bot) |
-| `ASK_OBJETIVO` | Tipo de empresa (opcional, 0 = saltar) |
-| `ASK_SEMESTRE` | Semestre actual (1-14) |
-| `ASK_PROMEDIO` | Promedio (0-10) |
-| `ASK_HABILIDADES` | Skills separadas por coma |
-| `ASK_NIVEL` | Nivel autopercibido (3 puntos) |
-| `ASK_HORARIO` | Días y rangos horarios |
-| `DONE` | Onboarding completo |
-| `EDIT_HABILIDADES` | Edición puntual de skills (vuelve a DONE) |
-| `EDIT_HORARIO` | Edición puntual de horario (vuelve a DONE) |
-| `EDIT_ESPECIALIDAD` | Edición/migración de especialidad (vuelve a DONE) |
-| `CV_ASK_PROYECTOS` → `CV_ASK_LOGROS` → `CV_ASK_LINKS` → `CV_ASK_EMAIL` | Mini-flujo de `/cv`; el último genera el PDF y vuelve a DONE |
-
-## Comandos del bot
-
-| Comando | Función |
-|---------|---------|
-| `/start` | Inicia o reinicia el onboarding |
-| `/perfil` | Muestra el perfil guardado |
-| `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
-| `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
-| `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
-| `/mercado` | Top 5 skills más pedidas para la carrera |
-| `/miCV` | Score de compatibilidad CV vs mercado |
-| `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
-| `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
-| `/plan` | Plan de estudios de 8 semanas con Groq |
-| `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
-| `/becas` | Becas filtradas por carrera con días restantes |
-| `/progreso` | Gráfica ASCII del historial de scores |
-| `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
-````
-
 ## File: scraper/app.py
 ````python
 import atexit
@@ -3144,6 +3034,206 @@ def scrape_occ(especialidad: str, max_pages: int = 2) -> dict:
     }
 ````
 
+## File: docs/contexto/arquitectura.md
+````markdown
+# Arquitectura
+
+## Stack
+
+| Capa | Tecnología | Versión mínima |
+|------|-----------|----------------|
+| Bot | Node.js + Telegraf.js | Node 20, Telegraf 4.x |
+| Scraper / API | Python + Flask | Python 3.11 |
+| Base de datos | MongoDB Atlas (tier M0) | pymongo 4.8 / mongoose 8.x |
+| LLM | Groq API (Llama 3.3 70B) | nube, compatible con OpenAI |
+| Scheduler Node | node-cron | 4.x |
+| Scheduler Python | APScheduler | 3.10 |
+| Logging Node | pino + pino-pretty | 9.x |
+| PDF (CV) | pdfkit (JS puro, Times-Roman built-in) | 0.15.x |
+
+## Mapa de carpetas
+
+```
+asistente/
+├── src/                   # Bot Node.js
+│   ├── index.js           # Entrypoint: comandos Telegraf, arranque
+│   ├── config.js          # Carga y valida variables de entorno (falla rápido)
+│   ├── logger.js          # Logger estructurado (pino, pretty en dev / JSON en prod)
+│   ├── db.js              # Conexión mongoose + fix DNS Google
+│   ├── models/
+│   │   └── profile.js     # Esquema perfil + estado conversación
+│   └── bot/
+│       ├── states.js      # Enum de estados de la FSM
+│       ├── especialidades.js # Taxonomía (especialidad/objetivo/nivel) — contrato con Python
+│       ├── onboarding.js  # Pasos del onboarding (prompt + handle)
+│       ├── cv_matcher.js  # COMPARA skills vs mercado (matchSkills, recordScore)
+│       ├── cv_generator.js # ARMA el CV: mini-flujo /cv + Groq + PDF (PDFKit)
+│       ├── planner.js     # Llama a Groq API para generar el plan
+│       ├── quiz.js        # Quiz interactivo (Groq + Zod, estado en memoria)
+│       ├── progreso.js    # Gráfica ASCII del historial de scores
+│       └── scheduler.js   # Crons: check-in semanal + re-score mensual
+├── scraper/               # API Python (puerto 5001)
+│   ├── app.py             # Flask: /health /skills /scrape /careers /becas
+│   ├── scraper.py         # Scrape OCC → fallback a SEED_DATA
+│   ├── extractor.py       # SKILLS_CATALOG + extract_skills() + rank_skills()
+│   ├── models.py          # pymongo: save_ranking / get_ranking / list_careers
+│   ├── becas.py           # SEED_BECAS + filtrar_becas()
+│   └── requirements.txt
+├── docs/contexto/         # Esta carpeta
+├── iniciar.bat            # Arranca ambos servicios con doble clic (Windows)
+├── Procfile               # worker: npm start (Railway)
+├── package.json           # ESM, scripts start/dev, dependencias
+└── .env / .env.example
+```
+
+## Flujo de datos por comando
+
+```
+/start      → FSM onboarding → guarda perfil en MongoDB
+
+/mercado    → POST /scrape (Python)
+               └── scrape_occ() → OCC o SEED_DATA
+               └── save_ranking() → MongoDB skill_rankings
+            → GET /skills → respuesta al usuario
+
+/miCV       → GET /skills
+            → matchSkills(profile.habilidades, skills)
+            → push score a profile.cvScores → guarda en MongoDB
+
+/plan       → GET /skills → extrae missing skills
+            → POST Groq /openai/v1/chat/completions (Llama 3.3 70B)
+            → respuesta al usuario
+
+/becas      → GET /becas (Python)
+            → filtrar_becas(carrera) sobre SEED_BECAS
+            → respuesta con semáforo de días
+
+/progreso   → lee profile.cvScores (últimos 6)
+            → generarGraficaProgreso() → gráfica ASCII
+
+Cron lunes 9AM  → sendWeeklyCheckin() → botones inline a todos los usuarios
+Cron día 1 mes  → monthlyRescore() → recalcula score, notifica si sube
+Cron lunes 6AM  → _weekly_scrape() (Python APScheduler) → re-scrapea OCC
+```
+
+## Colecciones MongoDB
+
+| Colección | Qué guarda |
+|-----------|-----------|
+| `profiles` | Un doc por usuario Telegram: perfil (incl. especialidad/objetivo/nivel) + estado FSM + historial de scores (con especialidad) |
+| `skill_rankings` | Un doc por **especialidad**: top skills + total_jobs + fecha de actualización |
+
+## Capa de especialidad (clave del diseño)
+
+`especialidad` es la "capa de precisión" entre la carrera (string libre) y el resto
+del bot. Las 5 keys (`desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`,
+`redes`) son un **contrato compartido** entre `src/bot/especialidades.js` (Node) y
+`ESPECIALIDAD_MAP` + `SEED_DATA` en `scraper/scraper.py` (Python). Cambiar una key
+exige tocar ambos lados. Todo (`/mercado`, `/miCV`, `/plan`, `/becas`, `/progreso`)
+se filtra por especialidad, no por carrera.
+
+Cada especialidad mapea a **varios títulos de OCC** (ej. `datos-ia` → data-scientist,
+analista-de-datos, data-engineer): `scrape_occ` itera sobre todos y combina los
+resultados (con `max_pages=2` por título para no disparar tiempo ni bloqueos),
+capturando una rebanada más realista del mercado que un solo slug.
+
+## API del scraper (contrato HTTP)
+
+| Endpoint | Parámetro clave |
+|----------|-----------------|
+| `POST /scrape` | body `{ especialidad }` (caché 24h) |
+| `GET /skills` | `?especialidad=&limit=` — nunca 404: si no hay ranking, cae a SEED_DATA |
+| `GET /becas` | `?especialidad=&carrera=&limit=` |
+| `GET /especialidades` | (lista las que tienen ranking) |
+
+## Qué NO existe
+
+- Tests (unitarios, integración o e2e)
+- Autenticación o autorización adicional (solo telegramId implícito)
+- Rate limiting en el bot o en la API Flask
+- Caché en memoria (Redis, etc.)
+- Google Calendar integration (mencionada en README, no implementada)
+- Panel de administración o dashboard
+- Logs estructurados / observabilidad (solo console.log / print)
+- Multilenguaje (solo español)
+- Variables de entorno en producción cloud (Railway no configurado todavía)
+````
+
+## File: docs/contexto/glosario.md
+````markdown
+# Glosario
+
+## Entidades del dominio
+
+| Término | Definición |
+|---------|-----------|
+| **Perfil** | Documento MongoDB que representa a un estudiante. Contiene sus datos personales, habilidades, horario, estado de conversación e historial de scores. Una sola colección: `profiles`. |
+| **Carrera** | String libre que el usuario escribe durante el onboarding. Ej: `"ing en sistemas computacionales"`. Es secundaria: la **especialidad** es la que dirige el bot. |
+| **Especialidad** | La "capa de precisión" entre carrera y todo lo demás. Una de 5 keys kebab-case: `desarrollo-web`, `datos-ia`, `ciberseguridad`, `devops-cloud`, `redes`. Dirige mercado, CV, plan y becas. Definida en `src/bot/especialidades.js` (Node) y `ESPECIALIDAD_MAP`/`SEED_DATA` (Python) — **contrato compartido, las keys deben coincidir**. |
+| **Objetivo** | Tipo de empresa donde quiere trabajar (opcional): `startup`, `corporativo`, `gobierno`, `freelance`, `emprendimiento`. Afina el plan. |
+| **Nivel** | Nivel técnico autopercibido (3 puntos): `principiante`, `intermedio`, `avanzado`. Ajusta la dificultad del plan. |
+| **Habilidades** | Array de strings que el usuario declara tener. Ej: `["JavaScript", "SQL", "Git"]`. Se normalizan con `ALIASES` antes de comparar con el mercado. |
+| **Horario** | Mapa `{ dia: "HH:MM-HH:MM" }` de disponibilidad semanal del estudiante. Se usa para personalizar el plan de estudios. Ej: `{ lunes: "19:00-21:00" }`. |
+| **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
+| **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
+| **Puntos / Racha / Nivel** | Gamificación (`gamificacion.js`). Puntos: +10 por acierto en `/quiz`, +50 por check-in semanal "sí". Nivel = puntos/100. Racha = semanas consecutivas completando el check-in (0 al fallar). |
+| **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
+| **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
+
+## Siglas y abreviaciones internas
+
+| Sigla | Significado |
+|-------|------------|
+| **FSM** | Finite State Machine — máquina de estados finita que guía el onboarding conversacional |
+| **SEED_DATA** | Datos de mercado precargados en `scraper.py` como fallback cuando OCC bloquea el scraper |
+| **SEED_BECAS** | Catálogo fijo de becas reales 2025-2026 en `becas.py` |
+| **ALIASES** | Mapa de normalización de abreviaciones de skills en `cv_matcher.js` (`js → JavaScript`) |
+| **CARRERA_MAP** | Mapa de nombres de carrera a slugs de OCC en `scraper.py` (`sistemas → desarrollador-de-software`) |
+| **SKILLS_CATALOG** | Lista de ~60 skills reconocibles en `extractor.py`, base del keyword matching |
+| **OCC** | OCC Mundial — portal de empleo mexicano scrapeado para obtener datos del mercado |
+| **SRV** | Tipo de registro DNS que MongoDB Atlas usa para su cadena de conexión `mongodb+srv://` |
+
+## Estados de la conversación (FSM)
+
+| Estado | Qué espera el bot |
+|--------|------------------|
+| `NEW` | Usuario recién creado, no ha empezado |
+| `ASK_NOMBRE` | Nombre del estudiante |
+| `ASK_CARRERA` | Carrera que estudia |
+| `ASK_ESPECIALIDAD` | Especialidad (menú numerado, dirige el bot) |
+| `ASK_OBJETIVO` | Tipo de empresa (opcional, 0 = saltar) |
+| `ASK_SEMESTRE` | Semestre actual (1-14) |
+| `ASK_PROMEDIO` | Promedio (0-10) |
+| `ASK_HABILIDADES` | Skills separadas por coma |
+| `ASK_NIVEL` | Nivel autopercibido (3 puntos) |
+| `ASK_HORARIO` | Días y rangos horarios |
+| `DONE` | Onboarding completo |
+| `EDIT_HABILIDADES` | Edición puntual de skills (vuelve a DONE) |
+| `EDIT_HORARIO` | Edición puntual de horario (vuelve a DONE) |
+| `EDIT_ESPECIALIDAD` | Edición/migración de especialidad (vuelve a DONE) |
+| `CV_ASK_PROYECTOS` → `CV_ASK_LOGROS` → `CV_ASK_LINKS` → `CV_ASK_EMAIL` | Mini-flujo de `/cv`; el último genera el PDF y vuelve a DONE |
+
+## Comandos del bot
+
+| Comando | Función |
+|---------|---------|
+| `/start` | Inicia o reinicia el onboarding |
+| `/perfil` | Muestra el perfil guardado |
+| `/especialidad` | Cambia la especialidad (recalcula mercado/CV/plan/becas) |
+| `/habilidades` | Edita solo las habilidades sin rehacer el onboarding |
+| `/horario` | Edita solo la disponibilidad sin rehacer el onboarding |
+| `/mercado` | Top 5 skills más pedidas para la carrera |
+| `/miCV` | Score de compatibilidad CV vs mercado |
+| `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
+| `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
+| `/puntos` | Puntos, nivel y racha semanal (gamificación) |
+| `/plan` | Plan de estudios de 8 semanas con Groq |
+| `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
+| `/becas` | Becas filtradas por carrera con días restantes |
+| `/progreso` | Gráfica ASCII del historial de scores |
+| `/cv` | Genera un CV estilo Harvard en PDF (mini-flujo de 4 preguntas) |
+````
+
 ## File: src/index.js
 ````javascript
 import { Telegraf } from 'telegraf';
@@ -3167,6 +3257,7 @@ import { cvSteps, generarCV } from './bot/cv_generator.js';
 import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client.js';
 import { ESPECIALIDADES } from './bot/especialidades.js';
 import { iniciarQuiz, responderQuiz } from './bot/quiz.js';
+import { otorgarPuntos, actualizarRacha, formatPuntos } from './bot/gamificacion.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -3356,20 +3447,34 @@ bot.command('progreso', async (ctx) => {
   await ctx.reply(grafica, { parse_mode: 'Markdown' });
 });
 
-// Respuestas al check-in semanal (botones inline)
+// Respuestas al check-in semanal (botones inline) — otorgan puntos + racha
 bot.action('checkin_si', async (ctx) => {
   await ctx.answerCbQuery();
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  let extra = '';
+  if (profile) {
+    const racha = actualizarRacha(profile, true);
+    const r = otorgarPuntos(profile, 50);
+    await profile.save();
+    extra = `\n\n⭐ +50 puntos · 🔥 Racha: ${racha} semana(s)`;
+    if (r.subioNivel) extra += `\n🎉 ¡Nivel ${r.nivel}!`;
+  }
   await ctx.editMessageText(
-    '¡Excelente! 🔥 Cada semana completada te acerca más a tu meta.\n\n' +
-    'Usa /plan para ver tu tarea de la próxima semana.'
+    '¡Excelente! 🔥 Cada semana completada te acerca más a tu meta.' + extra +
+    '\n\nUsa /plan para tu próxima tarea o /puntos para ver tu progreso.'
   );
 });
 
 bot.action('checkin_no', async (ctx) => {
   await ctx.answerCbQuery();
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (profile) {
+    actualizarRacha(profile, false); // rompe la racha
+    await profile.save();
+  }
   await ctx.editMessageText(
     '¡No pasa nada! 💪 Los mejores también tienen semanas difíciles.\n\n' +
-    'Intenta retomar esta semana. Usa /plan para ver tu lección pendiente.'
+    'Retoma esta semana para recuperar tu racha. Usa /plan para tu lección pendiente.'
   );
 });
 
@@ -3582,6 +3687,15 @@ bot.command('quiz', async (ctx) => {
 
 // Respuestas del quiz (botones inline: data "quiz:<pregunta>:<opcion>")
 bot.action(/^quiz:(\d+):(\d+)$/, responderQuiz);
+
+// /puntos — estado de gamificación (puntos, nivel, racha)
+bot.command('puntos', async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  await ctx.reply(formatPuntos(profile), { parse_mode: 'Markdown' });
+});
 
 // /perfil — muestra lo que el bot sabe de ti
 bot.command('perfil', async (ctx) => {

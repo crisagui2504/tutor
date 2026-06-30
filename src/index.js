@@ -19,6 +19,7 @@ import { cvSteps, generarCV } from './bot/cv_generator.js';
 import { scraperSkills, scraperScrape, scraperBecas } from './bot/scraper_client.js';
 import { ESPECIALIDADES } from './bot/especialidades.js';
 import { iniciarQuiz, responderQuiz } from './bot/quiz.js';
+import { otorgarPuntos, actualizarRacha, formatPuntos } from './bot/gamificacion.js';
 
 const bot = new Telegraf(config.botToken);
 
@@ -208,20 +209,34 @@ bot.command('progreso', async (ctx) => {
   await ctx.reply(grafica, { parse_mode: 'Markdown' });
 });
 
-// Respuestas al check-in semanal (botones inline)
+// Respuestas al check-in semanal (botones inline) — otorgan puntos + racha
 bot.action('checkin_si', async (ctx) => {
   await ctx.answerCbQuery();
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  let extra = '';
+  if (profile) {
+    const racha = actualizarRacha(profile, true);
+    const r = otorgarPuntos(profile, 50);
+    await profile.save();
+    extra = `\n\n⭐ +50 puntos · 🔥 Racha: ${racha} semana(s)`;
+    if (r.subioNivel) extra += `\n🎉 ¡Nivel ${r.nivel}!`;
+  }
   await ctx.editMessageText(
-    '¡Excelente! 🔥 Cada semana completada te acerca más a tu meta.\n\n' +
-    'Usa /plan para ver tu tarea de la próxima semana.'
+    '¡Excelente! 🔥 Cada semana completada te acerca más a tu meta.' + extra +
+    '\n\nUsa /plan para tu próxima tarea o /puntos para ver tu progreso.'
   );
 });
 
 bot.action('checkin_no', async (ctx) => {
   await ctx.answerCbQuery();
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (profile) {
+    actualizarRacha(profile, false); // rompe la racha
+    await profile.save();
+  }
   await ctx.editMessageText(
     '¡No pasa nada! 💪 Los mejores también tienen semanas difíciles.\n\n' +
-    'Intenta retomar esta semana. Usa /plan para ver tu lección pendiente.'
+    'Retoma esta semana para recuperar tu racha. Usa /plan para tu lección pendiente.'
   );
 });
 
@@ -434,6 +449,15 @@ bot.command('quiz', async (ctx) => {
 
 // Respuestas del quiz (botones inline: data "quiz:<pregunta>:<opcion>")
 bot.action(/^quiz:(\d+):(\d+)$/, responderQuiz);
+
+// /puntos — estado de gamificación (puntos, nivel, racha)
+bot.command('puntos', async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  await ctx.reply(formatPuntos(profile), { parse_mode: 'Markdown' });
+});
 
 // /perfil — muestra lo que el bot sabe de ti
 bot.command('perfil', async (ctx) => {

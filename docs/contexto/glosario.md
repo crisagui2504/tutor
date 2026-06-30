@@ -13,6 +13,7 @@
 | **Horario** | Mapa `{ dia: "HH:MM-HH:MM" }` de disponibilidad semanal del estudiante. Se usa para personalizar el plan de estudios. Ej: `{ lunes: "19:00-21:00" }`. |
 | **Score** | Porcentaje (0-100) de compatibilidad entre las habilidades del usuario y el top de skills del mercado. Se calcula en `matchSkills()` y se guarda en `cvScores`. |
 | **Forecasted self** | Proyección del score hacia adelante: cuánto subiría si el usuario aprende las skills que más le faltan (en orden de demanda). En `proyectarEscenarios()`, comando `/simular`. |
+| **Puntos / Racha / Nivel** | Gamificación (`gamificacion.js`). Puntos: +10 por acierto en `/quiz`, +50 por check-in semanal "sí". Nivel = puntos/100. Racha = semanas consecutivas completando el check-in (0 al fallar). |
 | **Beca** | Convocatoria de apoyo económico o capacitación. Tiene `nombre`, `institucion`, `monto`, `fecha_limite`, `url` y lista de `carreras` compatibles. |
 | **Ranking** | Documento en la colección `skill_rankings`: lista ordenada de skills con su frecuencia (`count`) y porcentaje (`pct`) en vacantes de OCC para una carrera dada. |
 
@@ -62,6 +63,7 @@
 | `/miCV` | Score de compatibilidad CV vs mercado |
 | `/simular` (`/futuro`) | "Forecasted self": proyecta tu score si aprendes lo que más falta |
 | `/comparar` | Tu score de compatibilidad en cada una de las 5 especialidades, rankeadas |
+| `/puntos` | Puntos, nivel y racha semanal (gamificación) |
 | `/plan` | Plan de estudios de 8 semanas con Groq |
 | `/quiz` | Quiz interactivo corto (3 preguntas, botones, feedback inmediato) |
 | `/becas` | Becas filtradas por carrera con días restantes |

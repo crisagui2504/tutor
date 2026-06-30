@@ -1,7 +1,11 @@
 import { Markup } from 'telegraf';
 import { z } from 'zod';
 import { config } from '../config.js';
+import { Profile } from '../models/profile.js';
+import { otorgarPuntos } from './gamificacion.js';
 import { ESPECIALIDADES, NIVELES, labelDe } from './especialidades.js';
+
+const PUNTOS_POR_ACIERTO = 10;
 
 /**
  * Quiz semanal interactivo. En vez de entregar el plan como un bloque grande de
@@ -149,9 +153,21 @@ export async function responderQuiz(ctx) {
         : aciertos >= total / 2
         ? '¡Bien! Vas por buen camino 💪'
         : 'Sigue practicando, lo vas a dominar 🌱';
+
+    // Otorga puntos por aciertos (gamificación)
+    let extra = '';
+    const profile = await Profile.findOne({ telegramId: ctx.from.id });
+    if (profile) {
+      const ganados = aciertos * PUNTOS_POR_ACIERTO;
+      const r = otorgarPuntos(profile, ganados);
+      await profile.save();
+      extra = `\n⭐ +${ganados} puntos (total: ${r.total})`;
+      if (r.subioNivel) extra += `\n🎉 ¡Subiste al nivel ${r.nivel}!`;
+    }
+
     await ctx.reply(
-      `🎯 *Quiz terminado*\nAcertaste *${aciertos}/${total}*. ${animo}\n\n` +
-        'Usa /plan para seguir tu plan o /quiz para otra ronda.',
+      `🎯 *Quiz terminado*\nAcertaste *${aciertos}/${total}*. ${animo}${extra}\n\n` +
+        'Usa /plan para seguir tu plan o /puntos para ver tu progreso.',
       { parse_mode: 'Markdown' }
     );
   }

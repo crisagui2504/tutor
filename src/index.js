@@ -5,7 +5,13 @@ import { logger } from './logger.js';
 import { Profile } from './models/profile.js';
 import { STATES } from './bot/states.js';
 import { steps, resumenPerfil } from './bot/onboarding.js';
-import { matchSkills, formatCVReport, recordScore } from './bot/cv_matcher.js';
+import {
+  matchSkills,
+  formatCVReport,
+  recordScore,
+  proyectarEscenarios,
+  formatProyeccion,
+} from './bot/cv_matcher.js';
 import { generatePlan } from './bot/planner.js';
 import { generarGraficaProgreso } from './bot/progreso.js';
 import { startScheduler } from './bot/scheduler.js';
@@ -299,6 +305,36 @@ bot.command(['micv', 'miCV'], async (ctx) => {
   } catch (err) {
     logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /miCV');
     await ctx.reply('Hubo un error al analizar tu CV. Intenta más tarde.');
+  }
+});
+
+// /simular — "forecasted self": proyecta tu score si aprendes lo que más falta
+bot.command(['simular', 'futuro'], async (ctx) => {
+  const profile = await Profile.findOne({ telegramId: ctx.from.id });
+  if (!profile?.onboardingCompleto) {
+    return ctx.reply('Primero completa tu perfil con /start 🙂');
+  }
+  if (isRateLimited(ctx.from.id, 'simular', 20)) {
+    return ctx.reply('Espera unos segundos antes de volver a simular ⏳');
+  }
+  if (!(await requireEspecialidad(ctx, profile))) return;
+
+  await ctx.sendChatAction('typing');
+  try {
+    const res = await scraperSkills(profile.especialidad, 10);
+    if (!res.ok) {
+      return ctx.reply('No hay datos del mercado aún. Usa /mercado primero.');
+    }
+    const data = await res.json();
+    if (!data.skills?.length) {
+      return ctx.reply('No hay datos del mercado aún. Usa /mercado primero.');
+    }
+
+    const proy = proyectarEscenarios(profile.habilidades, data.skills, 3);
+    await ctx.reply(formatProyeccion(proy), { parse_mode: 'Markdown' });
+  } catch (err) {
+    logger.error({ err: err.message, telegramId: ctx.from.id }, 'Error en /simular');
+    await ctx.reply('Hubo un error al simular tu progreso. Intenta más tarde.');
   }
 });
 

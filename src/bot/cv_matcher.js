@@ -59,6 +59,62 @@ export function matchSkills(userSkills, marketSkills) {
 }
 
 /**
+ * "Forecasted self": proyecta cómo subiría el score si el usuario aprende las
+ * skills que más le faltan (en orden de demanda del mercado). Reutiliza la misma
+ * lógica de comparación de matchSkills, pero mirando hacia adelante.
+ *
+ * @param {string[]} userSkills
+ * @param {Array<{skill:string}>} marketSkills - top del mercado, ordenado por demanda
+ * @param {number} hasta - cuántas skills proyectar (default 3)
+ * @returns {{actual:number, total:number, sinFaltantes:boolean,
+ *            escenarios: Array<{skill:string, score:number, delta:number}>}}
+ */
+export function proyectarEscenarios(userSkills, marketSkills, hasta = 3) {
+  const { score, have, missing } = matchSkills(userSkills, marketSkills);
+  const total = marketSkills.length;
+
+  const escenarios = [];
+  let prev = score;
+  // missing ya viene en orden de demanda (matchSkills recorre el ranking del mercado)
+  for (let k = 1; k <= Math.min(hasta, missing.length); k++) {
+    const proyectado = Math.round(((have.length + k) / total) * 100);
+    escenarios.push({ skill: missing[k - 1], score: proyectado, delta: proyectado - prev });
+    prev = proyectado;
+  }
+
+  return { actual: score, total, sinFaltantes: missing.length === 0, escenarios };
+}
+
+/**
+ * Formatea la proyección "forecasted self" para Telegram (Markdown).
+ */
+export function formatProyeccion(proy) {
+  if (proy.sinFaltantes) {
+    return (
+      '🔮 *Tu yo futuro*\n\n' +
+      '¡Ya dominas el top de skills de tu especialidad! 🏆\n' +
+      'Mantente al día con /mercado o cambia de rumbo con /especialidad.'
+    );
+  }
+
+  const lineas = proy.escenarios
+    .map((e) => `✅ + ${e.skill} → *${e.score}%* _(+${e.delta})_`)
+    .join('\n');
+
+  const ultimo = proy.escenarios.at(-1);
+  const totalDelta = ultimo.score - proy.actual;
+
+  return (
+    '🔮 *Tu yo futuro*\n\n' +
+    `Compatibilidad hoy: *${proy.actual}%*\n\n` +
+    'Si aprendes, en orden de demanda del mercado:\n' +
+    `${lineas}\n\n` +
+    `Dominando esas ${proy.escenarios.length} subes a *${ultimo.score}%* (+${totalDelta}) 🚀\n` +
+    'Usa /plan para aprenderlas paso a paso.'
+  );
+}
+
+/**
  * Registra un score en el historial del perfil, con UNA entrada por mes y
  * especialidad. Guarda contra qué especialidad se midió, para que /progreso no
  * compare peras (datos) con manzanas (ciberseguridad) si cambiaste de rumbo.
